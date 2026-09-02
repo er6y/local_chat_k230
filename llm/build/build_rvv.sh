@@ -2,8 +2,8 @@
 # build_rvv.sh - rebuild llama.cpp for K230 C908 with RVV intrinsics (static, glibc-2.33-proof)
 set -e
 TC=/root/toolchains/riscv64-lp64d--glibc--stable-2025.08-1/bin
-SRC=/mnt/d/work/git_dev/local_chat_k230/llamacpp
-BUILD=/mnt/d/work/git_dev/local_chat_k230/build-riscv-rvv
+SRC=/mnt/d/work/git_dev/k230_prj/k230_llm/llamacpp
+BUILD=/mnt/d/work/git_dev/k230_prj/k230_llm/build-riscv-rvv
 
 rm -rf $BUILD
 mkdir -p $BUILD && cd $BUILD

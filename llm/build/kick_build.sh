@@ -1,6 +1,6 @@
 ﻿#!/bin/bash
 # kick_build.sh - clean stale merged kmodels, start full 196-kmodel build in background
-cd /mnt/d/work/git_dev/local_chat_k230/.tools
+cd /mnt/d/work/git_dev/k230_prj/k230_llm/.tools
 rm -f /tmp/kpu_poc/qwen/l*_*.kmodel /tmp/kpu_poc/qwen/*.onnx \
       /tmp/kpu_poc/qwen/l0_qkv* /tmp/kpu_poc/qwen/l0_gu* /tmp/kpu_poc/qwen/l0_down* \
       /tmp/kpu_poc/qwen/l0_o* /tmp/kpu_poc/qwen/l0_q.* /tmp/kpu_poc/qwen/l0_k.* \

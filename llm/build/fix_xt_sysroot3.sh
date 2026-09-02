@@ -2,7 +2,7 @@
 # fix_xt_sysroot3.sh - add unversioned dev symlinks (-lpthread needs libpthread.so,
 # -lm needs libm.so, ...) then rebuild llama-bench with the Xuantie toolchain.
 set -e
-S=/mnt/d/work/git_dev/local_chat_k230/llm/build/xuantie/sysroot
+S=/mnt/d/work/git_dev/k230_prj/k230_llm/llm/build/xuantie/sysroot
 L=$S/lib64/lp64d
 cd "$L"
 ln -sf libpthread.so.0  libpthread.so
@@ -17,4 +17,4 @@ ln -sf libanl.so.1      libanl.so
 ln -sf libBrokenLocale.so.1 libBrokenLocale.so
 ls -la libpthread.so libm.so
 echo DEV_SYMLINKS_FIXED
-bash /mnt/d/work/git_dev/local_chat_k230/llm/build/build_xt.sh
+bash /mnt/d/work/git_dev/k230_prj/k230_llm/llm/build/build_xt.sh

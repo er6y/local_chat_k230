@@ -5,5 +5,5 @@
 SITE=~/venv_nncase29/lib/python3.10/site-packages
 cd /tmp/kpu_poc
 PATH="$SITE:$PATH" ~/venv_nncase29/bin/python \
-  /mnt/d/work/git_dev/local_chat_k230/.tools/sim_check_29.py "$@" 2>&1 \
+  /mnt/d/work/git_dev/k230_prj/k230_llm/.tools/sim_check_29.py "$@" 2>&1 \
   | grep -v 'warn\|PluginLoader\|is not set'

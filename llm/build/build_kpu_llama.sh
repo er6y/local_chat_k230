@@ -3,13 +3,13 @@
 # Produces build-riscv-kpu/bin/{llama-cli,llama-bench,libggml-cpu.so,...}
 set -e
 export PATH="$HOME/xuantie/bin:$PATH"
-cd /mnt/d/work/git_dev/local_chat_k230
+cd /mnt/d/work/git_dev/k230_prj/k230_llm
 
 export KPU_NNCASE_DIR=/tmp/nncase_rt
-export KPU_MMZ_SHIM=/mnt/d/work/git_dev/local_chat_k230/llm/build/mmz_shim.c
+export KPU_MMZ_SHIM=/mnt/d/work/git_dev/k230_prj/k230_llm/llm/build/mmz_shim.c
 
 cmake -B build-riscv-kpu -S llm/llamacpp \
-  -DCMAKE_TOOLCHAIN_FILE=/mnt/d/work/git_dev/local_chat_k230/llm/build/xt-toolchain.cmake \
+  -DCMAKE_TOOLCHAIN_FILE=/mnt/d/work/git_dev/k230_prj/k230_llm/llm/build/xt-toolchain.cmake \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON \
   -DGGML_RVV=ON \
