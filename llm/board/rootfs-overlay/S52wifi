@@ -1,0 +1,17 @@
+#!/bin/sh
+case "$1" in
+  start)
+    ifconfig wlan0 up
+    wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
+    udhcpc -i wlan0 -b -q -t 10 -T 3
+    if [ ! -f /var/run/wifi_keepalive.pid ] || ! kill -0 $(cat /var/run/wifi_keepalive.pid 2>/dev/null) 2>/dev/null; then
+        nohup setsid sh /usr/local/bin/wifi_keepalive.sh >/dev/null 2>&1 &
+        echo $! > /var/run/wifi_keepalive.pid
+    fi
+    ;;
+  stop)
+    kill $(cat /var/run/wifi_keepalive.pid 2>/dev/null) 2>/dev/null
+    rm -f /var/run/wifi_keepalive.pid
+    killall wpa_supplicant 2>/dev/null
+    ;;
+esac

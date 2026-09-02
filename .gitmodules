@@ -1,0 +1,3 @@
+[submodule "llm/llamacpp"]
+	path = llm/llamacpp
+	url = https://github.com/er6y/llama.cpp.git

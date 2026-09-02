@@ -1,0 +1,153 @@
+import io
+
+p = r'D:\work\git_dev\k230_prj\k230_llm\llamacpp\ggml\src\ggml-cpu\arch\riscv\quants.c'
+src = io.open(p, encoding='utf-8').read()
+
+v2 = r'''    // v2: 8-block unroll, 5 vsetvli per iteration (vs 3/4 in v1: the vsetvli
+    // config flush is the dominant per-block cost on this in-order core),
+    // 8 independent redsum + f32 accumulator chains, 16 dedicated scale
+    // temps (f16-f31) so every scale conversion pipelines. All loads use
+    // vle8 immediates (34*i <= 238 << 2047), no pointer temps needed.
+    if ((nb & 7) == 0 && nb >= 8) {
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+        float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+        const int8_t * pw = x[0].qs;
+        const int8_t * py = y[0].qs;
+        int cnt = nb >> 3;
+        __asm__ __volatile__(
+            "li t6, 32\n\t"
+            "vsetvli zero, t6, e32, m1, ta, ma\n\t"
+            "vmv.v.i v0, 0\n\t"
+            "1:\n\t"
+            "vsetvli zero, t6, e8, m2, ta, ma\n\t"
+            "vle8.v v8, 0(%[pw])\n\t"
+            "vle8.v v10, 0(%[py])\n\t"
+            "vle8.v v12, 34(%[pw])\n\t"
+            "vle8.v v14, 34(%[py])\n\t"
+            "vwmul.vv v16, v8, v10\n\t"
+            "vle8.v v8, 68(%[pw])\n\t"
+            "vle8.v v10, 68(%[py])\n\t"
+            "vwmul.vv v20, v12, v14\n\t"
+            "vle8.v v12, 102(%[pw])\n\t"
+            "vle8.v v14, 102(%[py])\n\t"
+            "vwmul.vv v24, v8, v10\n\t"
+            "vwmul.vv v28, v12, v14\n\t"
+            "vsetvli zero, t6, e16, m4, ta, ma\n\t"
+            "vwredsum.vs v8, v16, v0\n\t"
+            "vwredsum.vs v9, v20, v0\n\t"
+            "vwredsum.vs v10, v24, v0\n\t"
+            "vwredsum.vs v11, v28, v0\n\t"
+            // group B (blocks 4-7): loads issue while group A's redsums drain.
+            // Products land 4-aligned: p4=v24 p5=v28 p6=v16 p7=v20.
+            "vsetvli zero, t6, e8, m2, ta, ma\n\t"
+            "vle8.v v16, 136(%[pw])\n\t"
+            "vle8.v v18, 136(%[py])\n\t"
+            "vle8.v v20, 170(%[pw])\n\t"
+            "vle8.v v22, 170(%[py])\n\t"
+            "vwmul.vv v24, v16, v18\n\t"
+            "vwmul.vv v28, v20, v22\n\t"
+            "vle8.v v12, 204(%[pw])\n\t"
+            "vle8.v v14, 204(%[py])\n\t"
+            "vwmul.vv v16, v12, v14\n\t"
+            "vle8.v v12, 238(%[pw])\n\t"
+            "vle8.v v14, 238(%[py])\n\t"
+            "vwmul.vv v20, v12, v14\n\t"
+            "vsetvli zero, t6, e16, m4, ta, ma\n\t"
+            "vwredsum.vs v12, v24, v0\n\t"
+            "vwredsum.vs v13, v28, v0\n\t"
+            "vwredsum.vs v14, v16, v0\n\t"
+            "vwredsum.vs v15, v20, v0\n\t"
+            "vsetvli zero, t6, e32, m1, ta, ma\n\t"
+            "vmv.x.s a0, v8\n\t"
+            "flh f16, -2(%[pw])\n\t"
+            "vmv.x.s a1, v9\n\t"
+            "flh f17, -2(%[py])\n\t"
+            "vmv.x.s a2, v10\n\t"
+            "flh f18, 32(%[pw])\n\t"
+            "vmv.x.s a3, v11\n\t"
+            "flh f19, 32(%[py])\n\t"
+            "vmv.x.s a4, v12\n\t"
+            "flh f20, 66(%[pw])\n\t"
+            "vmv.x.s a5, v13\n\t"
+            "flh f21, 66(%[py])\n\t"
+            "vmv.x.s a6, v14\n\t"
+            "flh f22, 100(%[pw])\n\t"
+            "vmv.x.s a7, v15\n\t"
+            "flh f23, 100(%[py])\n\t"
+            "fcvt.s.h f16, f16\n\t"
+            "flh f24, 134(%[pw])\n\t"
+            "fcvt.s.h f17, f17\n\t"
+            "flh f25, 134(%[py])\n\t"
+            "fcvt.s.h f18, f18\n\t"
+            "flh f26, 168(%[pw])\n\t"
+            "fcvt.s.h f19, f19\n\t"
+            "flh f27, 168(%[py])\n\t"
+            "fcvt.s.h f20, f20\n\t"
+            "flh f28, 202(%[pw])\n\t"
+            "fcvt.s.h f21, f21\n\t"
+            "flh f29, 202(%[py])\n\t"
+            "fcvt.s.h f22, f22\n\t"
+            "flh f30, 236(%[pw])\n\t"
+            "fcvt.s.h f23, f23\n\t"
+            "flh f31, 236(%[py])\n\t"
+            "fcvt.s.h f24, f24\n\t"
+            "fcvt.s.w f4, a0\n\t"
+            "fcvt.s.h f25, f25\n\t"
+            "fcvt.s.w f5, a1\n\t"
+            "fcvt.s.h f26, f26\n\t"
+            "fcvt.s.w f6, a2\n\t"
+            "fcvt.s.h f27, f27\n\t"
+            "fcvt.s.w f7, a3\n\t"
+            "fcvt.s.h f28, f28\n\t"
+            "fcvt.s.w f8, a4\n\t"
+            "fcvt.s.h f29, f29\n\t"
+            "fcvt.s.w f9, a5\n\t"
+            "fcvt.s.h f30, f30\n\t"
+            "fcvt.s.w f10, a6\n\t"
+            "fcvt.s.h f31, f31\n\t"
+            "fcvt.s.w f11, a7\n\t"
+            "fmul.s f16, f16, f17\n\t"
+            "fmul.s f18, f18, f19\n\t"
+            "fmul.s f20, f20, f21\n\t"
+            "fmul.s f22, f22, f23\n\t"
+            "fmul.s f24, f24, f25\n\t"
+            "fmul.s f26, f26, f27\n\t"
+            "fmul.s f28, f28, f29\n\t"
+            "fmul.s f30, f30, f31\n\t"
+            "fmadd.s %[c0], f4, f16, %[c0]\n\t"
+            "fmadd.s %[c1], f5, f18, %[c1]\n\t"
+            "fmadd.s %[c2], f6, f20, %[c2]\n\t"
+            "fmadd.s %[c3], f7, f22, %[c3]\n\t"
+            "fmadd.s %[c4], f8, f24, %[c4]\n\t"
+            "fmadd.s %[c5], f9, f26, %[c5]\n\t"
+            "fmadd.s %[c6], f10, f28, %[c6]\n\t"
+            "fmadd.s %[c7], f11, f30, %[c7]\n\t"
+            "addi %[pw], %[pw], 272\n\t"
+            "addi %[py], %[py], 272\n\t"
+            "addi %[cnt], %[cnt], -1\n\t"
+            "bnez %[cnt], 1b\n\t"
+            : [pw]"+r"(pw), [py]"+r"(py), [cnt]"+r"(cnt),
+              [c0]"+f"(acc0), [c1]"+f"(acc1), [c2]"+f"(acc2), [c3]"+f"(acc3),
+              [c4]"+f"(acc4), [c5]"+f"(acc5), [c6]"+f"(acc6), [c7]"+f"(acc7)
+            :
+            : "t6",
+              "a0","a1","a2","a3","a4","a5","a6","a7",
+              "f4","f5","f6","f7","f8","f9","f10","f11",
+              "f16","f17","f18","f19","f20","f21","f22","f23",
+              "f24","f25","f26","f27","f28","f29","f30","f31",
+              "v0","v2","v3","v4","v5","v6","v7",
+              "v8","v9","v10","v11","v12","v13","v14","v15",
+              "v16","v17","v18","v19","v20","v21","v22","v23",
+              "v24","v25","v26","v27","v28","v29","v30","v31",
+              "memory","cc");
+        *s = (acc0 + acc1 + acc2 + acc3) + (acc4 + acc5 + acc6 + acc7);
+        return;
+    }
+
+'''
+
+marker = "    if ((nb & 3) == 0 && nb >= 4) {"
+i = src.index(marker)
+src = src[:i] + v2 + src[i:]
+io.open(p, 'w', encoding='utf-8', newline='\n').write(src)
+print("v2 inserted,", len(v2), "bytes")

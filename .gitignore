@@ -1,0 +1,40 @@
+# ===== 大二进制：一律不进 git =====
+*.gguf
+*.kmodel
+*.onnx
+*.bin
+*.f32
+*.npy
+*.tar
+*.tgz
+*.gz
+*.zip
+*.so
+*.so.*
+*.o
+*.a
+*.elf
+*.exe
+*.img
+*.dtbo
+
+# ===== 编译输出（仅根目录，别误伤 llm/build 等源码目录）=====
+/build*/
+/bin/
+/out/
+
+# ===== 运行日志/临时 =====
+*.log
+*.tmp
+tmp/
+cache/
+
+# ===== 环境与密钥 =====
+env/
+.venv/
+__pycache__/
+*.pyc
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
