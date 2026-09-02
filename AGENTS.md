@@ -42,6 +42,10 @@
 ## 编译（唯一正确路径）
 
 见 `llm/build/README.md`。核心三点：
-1. WSL 里 `bash llm/build/build_kpu_llama.sh`（或改码后 `deploy_test.sh` 一键编译）。
+1. WSL 里 `bash /mnt/d/work/git_dev/local_chat_k230/llm/build/build_kpu_llama.sh`（或改码后 `deploy_test.sh` 一键编译）。
 2. cmake 必须带 `KPU_NNCASE_DIR` 环境变量，否则**静默编出无 KPU 版本**（.so 变 ~800KB 就是中招）。
 3. 部署要覆盖板上三个 .so 名（.so/.so.0/.so.0.22.0）。
+
+老工作区 `D:\work\git_dev\k230_prj\k230_llm\llamacpp` 是 fork 的 git 仓库（snapshot 保命分支 + k230 分支）；
+主仓 `D:\work\git_dev\local_chat_k230` 的 `llm/llamacpp` 是 submodule，pin 在 `k230-v0.1`。
+编译用主仓路径，git 操作用 fork 路径。

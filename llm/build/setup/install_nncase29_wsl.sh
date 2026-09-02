@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # Route A step-1 helper: install nncase 2.9 + nncase-kpu 2.9 into ~/venv_nncase29 (WSL)
 # Retries because github.com connectivity is intermittent from this network.
 set -u

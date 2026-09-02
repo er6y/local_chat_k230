@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 OUT=/tmp/nncase_headers
 BASE=https://raw.githubusercontent.com/kendryte/nncase/master/src/Native/include/nncase
 mkdir -p $OUT/nncase/kernels/stackvm

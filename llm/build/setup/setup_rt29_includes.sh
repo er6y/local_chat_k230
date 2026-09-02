@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # setup_rt29_includes.sh - assemble include_root/ for the nncase 2.9 runtime
 # (the 2.11 one was hand-assembled by the predecessor; 2.9 tgz ships the full
 # Native include tree itself, only gsl_inc needs to be reused from 2.11)

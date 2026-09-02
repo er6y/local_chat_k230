@@ -1,0 +1,26 @@
+[
+  {
+    "prompt": "你好，请用一句话介绍你自己。",
+    "input_len": 19,
+    "output": "我是AI助手，致力于帮助您解决问题和获取信息。",
+    "output_tokens": 13,
+    "gen_seconds": 59.286,
+    "tokens_per_sec": 0.22
+  },
+  {
+    "prompt": "RISC-V 和 ARM 有什么区别？",
+    "input_len": 21,
+    "output": "RISC-V 和 ARM 都是基于指令集架构（Instruction Set Architecture, ISA）的开源处理器架构，但它们在设计目标、应用场景、性能、适用范围等方面存在显著差异。以下是两者的主要区别：\n\n---\n\n### 1. **设计目标与定位**\n- **RISC-V**：\n  - **开源**：RISC-V 是一个开源的指令集架构，由 RISC-V Foundation（非营利组织）维护，旨在促进跨",
+    "output_tokens": 96,
+    "gen_seconds": 303.905,
+    "tokens_per_sec": 0.32
+  },
+  {
+    "prompt": "把这句话翻译成英文：今天天气很好。",
+    "input_len": 22,
+    "output": "Today's weather is very good.",
+    "output_tokens": 8,
+    "gen_seconds": 4.816,
+    "tokens_per_sec": 1.66
+  }
+]

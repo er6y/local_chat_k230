@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # dl_rt29.sh - fetch v2.9 runtime linux tgz through a github mirror
 set -e
 URL=https://github.com/kendryte/nncase/releases/download/v2.9.0/nncase_k230_v2.9.0_runtime_linux.tgz

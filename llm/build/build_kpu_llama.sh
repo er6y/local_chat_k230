@@ -1,15 +1,15 @@
-#!/bin/bash
+﻿#!/bin/bash
 # build_kpu_llama.sh - cross-build llama.cpp with K230 KPU GEMM offload
 # Produces build-riscv-kpu/bin/{llama-cli,llama-bench,libggml-cpu.so,...}
 set -e
 export PATH="$HOME/xuantie/bin:$PATH"
-cd /mnt/d/work/git_dev/k230_prj/k230_llm
+cd /mnt/d/work/git_dev/local_chat_k230
 
 export KPU_NNCASE_DIR=/tmp/nncase_rt
-export KPU_MMZ_SHIM=/mnt/d/work/git_dev/k230_prj/k230_llm/.tools/mmz_shim.c
+export KPU_MMZ_SHIM=/mnt/d/work/git_dev/local_chat_k230/llm/build/mmz_shim.c
 
-cmake -B build-riscv-kpu -S llamacpp \
-  -DCMAKE_TOOLCHAIN_FILE=/mnt/d/work/git_dev/k230_prj/k230_llm/.tools/xt-toolchain.cmake \
+cmake -B build-riscv-kpu -S llm/llamacpp \
+  -DCMAKE_TOOLCHAIN_FILE=/mnt/d/work/git_dev/local_chat_k230/llm/build/xt-toolchain.cmake \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON \
   -DGGML_RVV=ON \
