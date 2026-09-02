@@ -1,3 +1,6 @@
 [submodule "llm/llamacpp"]
 	path = llm/llamacpp
 	url = https://github.com/er6y/llama.cpp.git
+[submodule "models/qwen3_06b"]
+	path = models/qwen3_06b
+	url = https://www.modelscope.cn/Qwen/Qwen3-0.6B.git
