@@ -4,6 +4,7 @@
 # site-packages must be on PATH (same trick sim_k.sh uses for the 2.11 install).
 SITE=~/venv_nncase29/lib/python3.10/site-packages
 cd /tmp/kpu_poc
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATH="$SITE:$PATH" ~/venv_nncase29/bin/python \
-  /mnt/d/work/git_dev/k230_prj/k230_llm/.tools/sim_check_29.py "$@" 2>&1 \
+  "$SCRIPT_DIR/sim_check_29.py" "$@" 2>&1 \
   | grep -v 'warn\|PluginLoader\|is not set'

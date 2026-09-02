@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 # validate_mixed.sh - KPU mixed mode (daemon+preload) + Chinese quality
 cd /mnt/data/kpu_llm
 export LD_LIBRARY_PATH=.
@@ -30,7 +30,7 @@ echo "----- Chinese quality (mixed) -----" >> $R
 sh ./safe_run.sh $INNER env \
   KPU_HYBRID=1 KPU_DAEMON=1 KPU_KMODEL_DIR=/mnt/data/kpu_qwen \
   KPU_TILES=s4 KPU_PRELOAD=1 KPU_RESIDENT=200 \
-  ./llama-cli -m $M -t 1 -p '你好，请用中文介绍一下自己' -n 80 --no-display-prompt
+  ./llama-cli -m $M -t 1 -p '浣犲ソ锛岃鐢ㄤ腑鏂囦粙缁嶄竴涓嬭嚜宸? -n 80 --no-display-prompt
 if grep -q 'corrupted\|Aborted' $INNER; then
   echo "  RESULT: ABORT <<<<" >> $R
 else

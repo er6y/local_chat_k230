@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 # run_perf3.sh - measure prefill wall time using /proc/uptime seconds (float)
 MODE="$1"
 cd /mnt/data/kpu_llm

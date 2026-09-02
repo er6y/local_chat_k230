@@ -1,4 +1,5 @@
 #!/bin/bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 # build_vendor_test.sh - Cross-compile t_vendor.cpp against vendor nncase runtime
 set -e
 
@@ -17,9 +18,9 @@ fi
 echo "Using CXX: $CXX"
 $CXX --version | head -1
 
-SRC=/mnt/d/work/git_dev/k230_prj/k230_llm/.tools/t_vendor.cpp
-SHIM=/mnt/d/work/git_dev/k230_prj/k230_llm/.tools/mmz_shim.c
-OUT=/mnt/d/work/git_dev/k230_prj/k230_llm/.tools/t_vendor
+SRC=$ROOT/llm/build/t_vendor.cpp
+SHIM=$ROOT/llm/build/mmz_shim.c
+OUT=$ROOT/llm/build/t_vendor
 
 # Include paths:
 # - NNCASE_INC: the runtime package headers

@@ -2,8 +2,9 @@
 # relink_static.sh - find offending symbols, then relink binaries fully static (glibc 2.33-proof)
 set -e
 TC=/root/toolchains/riscv64-lp64d--glibc--stable-2025.08-1/bin
-BUILD=/mnt/d/work/git_dev/k230_prj/k230_llm/build-riscv-rvv
-SRC=/mnt/d/work/git_dev/k230_prj/k230_llm/llamacpp
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BUILD=$ROOT/build-riscv-rvv
+SRC=$ROOT/llm/llamacpp
 
 echo "=== which symbols need > 2.33 ==="
 $TC/riscv64-buildroot-linux-gnu-objdump -T $BUILD/bin/llama-bench 2>/dev/null | grep -E 'GLIBC_2\.(3[4-9]|[4-9][0-9])' | awk '{print $NF, $(NF-1)}' | sort -u | head -15

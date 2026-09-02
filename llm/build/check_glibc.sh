@@ -1,7 +1,8 @@
 ﻿#!/bin/bash
 # check_glibc.sh - verify new RVV binaries don't need glibc newer than 2.33 (board's version)
 TC=/root/toolchains/riscv64-lp64d--glibc--stable-2025.08-1/bin
-BUILD=/mnt/d/work/git_dev/k230_prj/k230_llm/build-riscv-rvv
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+BUILD=$ROOT/build-riscv-rvv
 
 echo "=== binaries built ==="
 ls -la $BUILD/bin/ | grep -E 'llama-bench|llama-completion'

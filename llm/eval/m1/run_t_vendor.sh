@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 # run_t_vendor.sh - Run t_vendor with safe_run wrapper, output to log
 export LD_LIBRARY_PATH=/mnt/data/kpu_llm
 export LD_BIND_NOW=1

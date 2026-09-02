@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 # validate_fix.sh - verify the fs_anchor fix: no abort + performance intact
 cd /mnt/data/kpu_llm
 export LD_LIBRARY_PATH=.

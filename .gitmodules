@@ -3,4 +3,4 @@
 	url = https://github.com/er6y/llama.cpp.git
 [submodule "models/qwen3_06b"]
 	path = models/qwen3_06b
-	url = https://www.modelscope.cn/Qwen/Qwen3-0.6B.git
+	url = https://gh-proxy.com/https://huggingface.co/Qwen/Qwen3-0.6B

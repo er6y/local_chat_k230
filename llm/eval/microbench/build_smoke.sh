@@ -1,15 +1,16 @@
 #!/bin/bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 # build_smoke.sh - build static RVV smoke test + riscv llama-quantize
 set -e
 TC=/root/toolchains/riscv64-lp64d--glibc--stable-2025.08-1/bin
-SRC=/mnt/d/work/git_dev/k230_prj/k230_llm/llamacpp
-BUILD=/mnt/d/work/git_dev/k230_prj/k230_llm/build-riscv-rvv
+SRC=$ROOT/llamacpp
+BUILD=$ROOT/build-riscv-rvv
 
 echo "=== build rvv_smoke (static) ==="
 $TC/riscv64-buildroot-linux-gnu-gcc -march=rv64gcv_zicbop_zihintpause -mabi=lp64d -O2 -static \
-  /mnt/d/work/git_dev/k230_prj/k230_llm/.tools/rvv_smoke.c \
-  -o /mnt/d/work/git_dev/k230_prj/k230_llm/.tools/rvv_smoke
-ls -la /mnt/d/work/git_dev/k230_prj/k230_llm/.tools/rvv_smoke
+  $ROOT/llm/build/rvv_smoke.c \
+  -o $ROOT/llm/build/rvv_smoke
+ls -la $ROOT/llm/build/rvv_smoke
 echo "SMOKE_BUILD_OK"
 
 echo "=== build llama-quantize (static) ==="

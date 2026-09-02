@@ -2,7 +2,7 @@
 # build_xt.sh - reconfigure (new project path) + full rebuild llama-bench with Xuantie toolchain
 # mirrors the original build-riscv configure flags extracted from the old CMakeCache
 set -e
-D=/mnt/d/work/git_dev/k230_prj/k230_llm
+D="$(cd "$(dirname "$0")/../.." && pwd)"
 # ensure xuantie toolchain symlink exists inside WSL (single WSL invocation per run)
 ln -sfn "$D/llm/build/xuantie" /root/xuantie
 ls /root/xuantie/bin/riscv64-unknown-linux-gnu-gcc

@@ -3,13 +3,16 @@
 # Produces build-riscv-kpu/bin/{llama-cli,llama-bench,libggml-cpu.so,...}
 set -e
 export PATH="$HOME/xuantie/bin:$PATH"
-cd /mnt/d/work/git_dev/k230_prj/k230_llm
+
+# repo root = parent of llm/build/
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
 
 export KPU_NNCASE_DIR=/tmp/nncase_rt
-export KPU_MMZ_SHIM=/mnt/d/work/git_dev/k230_prj/k230_llm/llm/build/mmz_shim.c
+export KPU_MMZ_SHIM="$ROOT/llm/build/mmz_shim.c"
 
 cmake -B build-riscv-kpu -S llm/llamacpp \
-  -DCMAKE_TOOLCHAIN_FILE=/mnt/d/work/git_dev/k230_prj/k230_llm/llm/build/xt-toolchain.cmake \
+  -DCMAKE_TOOLCHAIN_FILE="$ROOT/llm/build/xt-toolchain.cmake" \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=ON \
   -DGGML_RVV=ON \
@@ -25,7 +28,7 @@ cmake --build build-riscv-kpu --target llama-cli llama-bench -j"$(nproc)" 2>&1 |
 
 ls -la build-riscv-kpu/bin/ | grep -E 'llama-cli|llama-bench|ggml-cpu'
 echo "== verify kpu symbols in libggml-cpu.so =="
-/root/xuantie/bin/riscv64-unknown-linux-gnu-nm -D build-riscv-kpu/bin/libggml-cpu.so | grep -E 'ggml_kpu|nncase|kd_mpi' | head -10
+"$HOME/xuantie/bin/riscv64-unknown-linux-gnu-nm" -D build-riscv-kpu/bin/libggml-cpu.so | grep -E 'ggml_kpu|nncase|kd_mpi' | head -10
 echo "== verify R_RISCV_USE_HI20 (mmz shim asm intact) =="
-/root/xuantie/bin/riscv64-unknown-linux-gnu-readelf -d build-riscv-kpu/bin/libggml-cpu.so | head -8
+"$HOME/xuantie/bin/riscv64-unknown-linux-gnu-readelf" -d build-riscv-kpu/bin/libggml-cpu.so | head -8
 echo BUILD_OK

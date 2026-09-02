@@ -1,8 +1,9 @@
 #!/bin/bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 # build_microbench.sh - compile C908 microbench + xtheadvector probe with bootlin GCC in WSL
 set -e
 CC=/root/toolchains/riscv64-lp64d--glibc--stable-2025.08-1/bin/riscv64-buildroot-linux-gnu-gcc
-T=/mnt/d/work/git_dev/k230_prj/k230_llm/.tools
+T=$ROOT/llm/build
 
 $CC -O2 -march=rv64gcv_zicbop_zihintpause -mabi=lp64d -static \
     -o $T/c908_microbench $T/c908_microbench.c
