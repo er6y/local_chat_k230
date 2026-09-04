@@ -88,6 +88,13 @@ static void mmz_atexit_release_all(void) {
                 n, mmz_free_calls);
 }
 
+/* Explicit release for callers that finish with _exit() (atexit handlers
+ * never run there). tts_zh uses this: releasing via atexit runs BEFORE the
+ * runtime's static destructors, which then dereference the freed segments
+ * (exit segfault); releasing here + _exit skips that teardown entirely.
+ * Only safe if the caller exits immediately after. */
+void mmz_shim_release_all(void) { mmz_atexit_release_all(); }
+
 int kd_mpi_sys_mmz_alloc_cached(uint64_t *phy_addr, void **virt_addr,
                                 const char *mmb, const char *zone, uint32_t len) {
     (void)mmb; (void)zone;
@@ -432,7 +439,14 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
         if (w) {
             // wait for work_status(bits14-15) to leave RUNNING(1) back to IDLE(0),
             // bounded like the hardware timeout (200000 units ~ 200ms)
-            for (int i = 0; i < 200000; i++) {
+            // GNNE_POLL_SLEEP_US=N (default 0=spin): sleep between status checks
+            // so a co-running task (LLM decode) keeps the single core.
+            static int sleep_us = -1;
+            if (sleep_us < 0)
+                sleep_us = getenv("GNNE_POLL_SLEEP_US") ?
+                           atoi(getenv("GNNE_POLL_SLEEP_US")) : 0;
+            int bound = sleep_us > 0 ? 200000000 / sleep_us : 200000;
+            for (int i = 0; i < bound; i++) {
                 uint64_t st = w[8];
                 if (((st >> 14) & 3) != 1) {          // not RUNNING anymore
                     fds[0].revents = POLLIN;
@@ -440,7 +454,8 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
                          (unsigned long long)st);
                     return 1;
                 }
-                for (int v = 0; v < 50; v++) __asm__ volatile("");
+                if (sleep_us > 0) usleep((useconds_t)sleep_us);
+                else for (int v = 0; v < 50; v++) __asm__ volatile("");
             }
             fds[0].revents = POLLIN;
             GTRC("[gnne] poll: TIMEOUT busy-wait, status still RUNNING\n");

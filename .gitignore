@@ -22,6 +22,7 @@
 /build*/
 /bin/
 /out/
+/tts/build-tts/
 
 # ===== 模型（qwen3_06b 是 HF submodule；gguf 是自转的，不进 git）=====
 models/qwen3_06b_gguf/
@@ -41,3 +42,5 @@ __pycache__/
 # ===== OS =====
 .DS_Store
 Thumbs.db
+/tts/output/
+/tts/vendor/
