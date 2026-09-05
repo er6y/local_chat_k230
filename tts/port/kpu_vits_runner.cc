@@ -23,6 +23,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <unistd.h>
 
@@ -265,6 +266,13 @@ int main(int argc, char *argv[]) {
   std::string dump_logw;      // debug: dump kmodel logw + ORT logw per sentence
   float nsd_override = -1.0f; // debug: override noise_scale_dur (0 = deterministic)
   std::string probe_dpx;      // debug: raw dp_x.bin + tok.bin + tl + spk probe
+  std::string probe_matcha;   // debug: matcha probe (tokens.bin)
+  std::string matcha_say;     // matcha: synthesize text to --output wav
+  std::string matcha_acoustic;
+  std::string matcha_vocoder;
+  std::string matcha_kmodel;
+  std::string matcha_lexicon;
+  std::string matcha_tokens;
 
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
@@ -286,10 +294,442 @@ int main(int argc, char *argv[]) {
     else if (arg.rfind("--dump-logw=", 0) == 0) dump_logw = arg.substr(12);
     else if (arg.rfind("--nsd=", 0) == 0) nsd_override = std::stof(arg.substr(6));
     else if (arg.rfind("--probe-dpx=", 0) == 0) probe_dpx = arg.substr(12);
+    else if (arg.rfind("--probe-matcha=", 0) == 0) probe_matcha = arg.substr(15);
+    else if (arg.rfind("--matcha-say=", 0) == 0) matcha_say = arg.substr(13);
+    else if (arg.rfind("--matcha-acoustic=", 0) == 0) matcha_acoustic = arg.substr(18);
+    else if (arg.rfind("--matcha-vocoder=", 0) == 0) matcha_vocoder = arg.substr(17);
+    else if (arg.rfind("--matcha-kmodel=", 0) == 0) matcha_kmodel = arg.substr(16);
+    else if (arg.rfind("--matcha-lexicon=", 0) == 0) matcha_lexicon = arg.substr(17);
+    else if (arg.rfind("--matcha-tokens=", 0) == 0) matcha_tokens = arg.substr(16);
     else if (arg.rfind("--output=", 0) == 0) out_wav = arg.substr(9);
   }
 
   printf("=== KPU VITS TTS Runner ===\n");
+
+  // ==== matcha probe: acoustic (CPU) + vocoder ORT vs KPU comparison ====
+  // ==== matcha say: text -> (greedy longest-match lexicon) -> acoustic CPU
+  // ==== -> KPU vocoder -> 22050Hz wav. Needs --matcha-acoustic/kmodel/lexicon.
+  if (!matcha_say.empty()) {
+    if (matcha_acoustic.empty() || (matcha_kmodel.empty() && matcha_vocoder.empty()) ||
+        matcha_lexicon.empty() || matcha_tokens.empty()) {
+      fprintf(stderr, "--matcha-say needs --matcha-acoustic + (kmodel|vocoder) + lexicon/tokens\n");
+      return 1;
+    }
+    const bool voc_is_ort = matcha_kmodel.empty();
+    const bool voc_dual = !voc_is_ort && getenv("MATCHA_DUAL") != nullptr;
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    k230_kpu_init();
+    Ort::Env menv(ORT_LOGGING_LEVEL_WARNING, "matcha");
+    Ort::SessionOptions mso;
+    mso.SetIntraOpNumThreads(1);
+    mso.SetInterOpNumThreads(1);
+    auto mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    Ort::Session aco(menv, matcha_acoustic.c_str(), mso);
+    std::unique_ptr<KpuModel> kvoc;
+    std::unique_ptr<Ort::Session> ovoc;
+    if (voc_is_ort || voc_dual)
+      ovoc = std::make_unique<Ort::Session>(menv, matcha_vocoder.c_str(), mso);
+    if (!voc_is_ort)
+      kvoc = std::make_unique<KpuModel>(matcha_kmodel, "hifigan");
+    // optional per-band mel equalization for the folded vocoder kmodel
+    std::vector<float> eq_c, eq_s;
+    if (!voc_is_ort) {
+      const std::string dir = matcha_kmodel.substr(0, matcha_kmodel.find_last_of('/'));
+      FILE *f = fopen((dir + "/mel_eq.bin").c_str(), "rb");
+      if (f) {
+        std::vector<float> buf(160);
+        if (fread(buf.data(), 4, 160, f) == 160) {
+          eq_c.assign(buf.begin(), buf.begin() + 80);
+          eq_s.assign(buf.begin() + 80, buf.end());
+        }
+        fclose(f);
+      }
+      printf("[matcha] mel_eq: %s\n", eq_c.empty() ? "none" : "loaded");
+    }
+
+    // lexicon: word -> token ids (longest-match segmentation over UTF-8)
+    std::unordered_map<std::string, int64_t> tok2id;
+    {
+      // line-based: the token itself may be a single space (" 0"), which
+      // stream extraction (>>) cannot represent
+      std::ifstream tf(matcha_tokens);
+      std::string line;
+      while (std::getline(tf, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t lastsp = line.find_last_of(' ');
+        if (lastsp == std::string::npos) continue;
+        std::string tok = line.substr(0, lastsp);
+        try {
+          int64_t id = std::stoll(line.substr(lastsp + 1));
+          tok2id[tok] = id;
+        } catch (...) {}
+      }
+      printf("[matcha] tokens=%zu\n", tok2id.size());
+    }
+    std::unordered_map<std::string, std::vector<int64_t>> w2ids;
+    std::vector<std::string> words_sorted;  // for greedy max match
+    {
+      std::ifstream lf(matcha_lexicon);
+      std::string line;
+      while (std::getline(lf, line)) {
+        size_t sp = line.find(' ');
+        if (sp == std::string::npos) continue;
+        std::string w = line.substr(0, sp);
+        std::vector<int64_t> ids;
+        std::istringstream rest(line.substr(sp + 1));
+        std::string syl;
+        while (rest >> syl) {
+          auto it = tok2id.find(syl);
+          if (it != tok2id.end()) ids.push_back(it->second);
+        }
+        if (!ids.empty() && w2ids.find(w) == w2ids.end()) {
+          w2ids[w] = ids;
+          words_sorted.push_back(w);
+        }
+      }
+      std::sort(words_sorted.begin(), words_sorted.end(),
+                [](const std::string &a, const std::string &b) {
+                  return a.size() > b.size();
+                });
+      printf("[matcha] lexicon words=%zu\n", words_sorted.size());
+    }
+
+    // split text into sentences at 。！？；，tokenize each via greedy match.
+    // sherpa convention (matcha-tts-lexicon.cc + OfflineTtsImpl::AddBlank):
+    //   - punctuation maps to tokens (，→, 。→. ！→! ？→? ；→;) appended to the
+    //     sentence before splitting
+    //   - every sentence then gets pad tokens interleaved: [pad, t0, pad, t1,
+    //     ..., pad] with pad = '_' (id 1, from model metadata pad_id)
+    // without the interleaving the acoustic sees an out-of-distribution
+    // token stream and produces gibberish mel.
+    std::vector<std::vector<int64_t>> sents;
+    {
+      std::vector<int64_t> cur;
+      const std::string &t = matcha_say;
+      size_t i = 0;
+      while (i < t.size()) {
+        // try longest lexicon word at i (bytes; entries are whole UTF-8 words)
+        bool matched = false;
+        for (const auto &w : words_sorted) {
+          if (w.size() <= t.size() - i && t.compare(i, w.size(), w) == 0) {
+            const auto &ids = w2ids[w];
+            cur.insert(cur.end(), ids.begin(), ids.end());
+            i += w.size();
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          // punctuation: map to the ASCII token, append, and split the sentence
+          static const std::pair<const char *, const char *> PUNCTS[] = {
+              {"。", "."}, {"！", "!"}, {"？", "?"}, {"；", ";"}, {"，", ","},
+          };
+          bool is_punct = false;
+          for (const auto &pp : PUNCTS) {
+            if (t.compare(i, 3, pp.first) == 0) {
+              auto it = tok2id.find(pp.second);
+              if (it != tok2id.end()) cur.push_back(it->second);
+              if (!cur.empty()) { sents.push_back(cur); cur.clear(); }
+              i += 3;
+              is_punct = true;
+              break;
+            }
+          }
+          if (!is_punct) ++i;  // skip ASCII/unknown byte
+        }
+      }
+      if (!cur.empty()) sents.push_back(cur);
+      // AddBlank interleave: [pad, t0, pad, t1, ..., pad]
+      const int64_t pad = tok2id.count("_") ? tok2id.at("_") : 1;
+      for (auto &s : sents) {
+        std::vector<int64_t> b(s.size() * 2 + 1, pad);
+        for (size_t j = 0; j < s.size(); ++j) b[1 + j * 2] = s[j];
+        s = std::move(b);
+      }
+    }
+    printf("[matcha] %zu sentences\n", sents.size());
+
+    float ns = 1.0f, ls = 1.0f;  // sherpa matcha defaults (NOT vits' 0.667!)
+    if (getenv("MATCHA_NS")) ns = atof(getenv("MATCHA_NS"));
+    std::vector<float> audio_out;
+    std::vector<float> ort_out;
+    double t_aco = 0, t_kpu = 0;
+    for (size_t si = 0; si < sents.size(); ++si) {
+      const auto &ids = sents[si];
+      const int64_t L = (int64_t)ids.size();
+      int64_t shp[2] = {1, L};
+      int64_t one[1] = {1};
+      int64_t xl = L;
+      const char *in[] = {"x", "x_length", "noise_scale", "length_scale"};
+      std::vector<Ort::Value> vi;
+      vi.push_back(Ort::Value::CreateTensor<int64_t>(mem, const_cast<int64_t *>(ids.data()), ids.size(), shp, 2));
+      vi.push_back(Ort::Value::CreateTensor<int64_t>(mem, &xl, 1, one, 1));
+      vi.push_back(Ort::Value::CreateTensor<float>(mem, &ns, 1, one, 1));
+      vi.push_back(Ort::Value::CreateTensor<float>(mem, &ls, 1, one, 1));
+      auto a = clk::now();
+      const char *aco_out[] = {"mel"};
+      auto out = aco.Run(Ort::RunOptions{nullptr}, in, vi.data(), 4, aco_out, 1);
+      t_aco += ms(a, clk::now());
+      auto info = out[0].GetTensorTypeAndShapeInfo();
+      const int64_t Lm = info.GetShape()[2];
+      const float *mp = out[0].GetTensorData<float>();
+      if (getenv("MATCHA_DUMP_MEL")) {
+        char p[256];
+        snprintf(p, sizeof(p), "%s.mel.f32", out_wav.c_str());
+        FILE *f = fopen(p, "ab");
+        if (f) { fwrite(mp, 4, 80 * Lm, f); fclose(f); }
+      }
+      std::vector<float> wav;
+      if (voc_is_ort) {
+        // ORT vocoder on the exact-length mel (quality reference path)
+        int64_t v_shape[3] = {1, 80, Lm};
+        Ort::Value mv = Ort::Value::CreateTensor<float>(
+            mem, const_cast<float *>(mp), 80 * Lm, v_shape, 3);
+        const char *vin[] = {"mel"};
+        const char *vout[] = {"audio"};
+        auto b = clk::now();
+        auto vres = ovoc->Run(Ort::RunOptions{nullptr}, vin, &mv, 1, vout, 1);
+        t_kpu += ms(b, clk::now());
+        size_t n_el = vres[0].GetTensorTypeAndShapeInfo().GetElementCount();
+        const float *vp = vres[0].GetTensorData<float>();
+        wav.assign(vp, vp + n_el);
+      } else {
+        // KPU vocoder in 128-frame chunks (the b512 bucket's tiled
+        // ConvTranspose kernels are broken on K230; single-tile b128 is
+        // verified cos 0.96). Chunks crossfaded by 1 frame (256 samples).
+        const int64_t CH = 128;
+        const size_t XF = 256;  // crossfade samples (1 hop)
+        std::vector<float> chunk(kvoc->output_bytes(0) / sizeof(float));
+        int64_t produced = 0;
+        for (int64_t c0 = 0; c0 < Lm; c0 += CH) {
+          const int64_t f = std::min<int64_t>(CH, Lm - c0);
+          std::vector<float> mel_pad(80 * CH, -12.0f);
+          for (int cb = 0; cb < 80; ++cb)
+            memcpy(&mel_pad[cb * CH], &mp[cb * Lm + c0], f * sizeof(float));
+          if (!eq_c.empty())
+            for (int b = 0; b < 80; ++b)
+              for (int t = 0; t < CH; ++t)
+                mel_pad[b * CH + t] = (mel_pad[b * CH + t] - eq_c[b]) * eq_s[b];
+          auto b = clk::now();
+          kvoc->Run({mel_pad.data()}, {chunk.data()});
+          t_kpu += ms(b, clk::now());
+          const size_t n = (size_t)f * 256;
+          if (produced == 0) {
+            wav.assign(chunk.begin(), chunk.begin() + n);
+          } else {
+            // crossfade the new chunk's head with the previous tail
+            for (size_t j = 0; j < XF && j < wav.size() && j < n; ++j) {
+              const double w = (double)j / XF;
+              wav[wav.size() - XF + j] =
+                  (float)(wav[wav.size() - XF + j] * (1.0 - w) + chunk[j] * w);
+            }
+            wav.insert(wav.end(), chunk.begin() + XF, chunk.begin() + n);
+          }
+          produced += f;
+        }
+      }
+      const size_t n = wav.size();
+      // 20ms fade-out at the sentence tail (last chunk's boundary artifact)
+      const size_t fade = std::min<size_t>(n, 441);
+      for (size_t j = 0; j < fade; ++j) wav[n - fade + j] *= (float)(1.0 - (double)j / fade);
+      audio_out.insert(audio_out.end(), wav.begin(), wav.begin() + n);
+      if (voc_dual && ovoc) {
+        // same-mel ORT reference for A/B: exact-length vocoding
+        int64_t v_shape[3] = {1, 80, Lm};
+        Ort::Value mv = Ort::Value::CreateTensor<float>(
+            mem, const_cast<float *>(mp), 80 * Lm, v_shape, 3);
+        const char *vin[] = {"mel"};
+        const char *vout[] = {"audio"};
+        auto vres = ovoc->Run(Ort::RunOptions{nullptr}, vin, &mv, 1, vout, 1);
+        size_t n_el = vres[0].GetTensorTypeAndShapeInfo().GetElementCount();
+        const float *vp = vres[0].GetTensorData<float>();
+        ort_out.insert(ort_out.end(), vp, vp + n_el);
+      }
+      printf("  [matcha] sent %zu: %ld tok -> mel %ld -> %.2fs\n",
+             si, (long)L, (long)Lm, n / 22050.0);
+    }
+    {
+      auto a = clk::now();
+      sherpa_onnx::WriteWave(out_wav, 22050, audio_out.data(), audio_out.size());
+      if (!ort_out.empty()) {
+        std::string ortp = out_wav + ".ort.wav";
+        sherpa_onnx::WriteWave(ortp, 22050, ort_out.data(), ort_out.size());
+        printf("[matcha] ort ref wav: %s\n", ortp.c_str());
+      }
+      printf("[matcha] wav write %.1fms\n", ms(a, clk::now()));
+    }
+    const double audio_s = (double)audio_out.size() / 22050.0;
+    printf("[matcha] DONE %s audio=%.2fs aco=%.0fms kpu=%.0fms RTF=%.3f\n",
+           out_wav.c_str(), audio_s, t_aco, t_kpu, (t_aco + t_kpu) / 1000.0 / audio_s);
+    mmz_shim_release_all();
+    _exit(0);
+  }
+
+  if (!probe_matcha.empty()) {
+    if (matcha_acoustic.empty() || matcha_vocoder.empty() || matcha_kmodel.empty()) {
+      fprintf(stderr, "--probe-matcha needs --matcha-acoustic/vocoder/kmodel\n");
+      return 1;
+    }
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    k230_kpu_init();
+    Ort::Env menv(ORT_LOGGING_LEVEL_WARNING, "matcha");
+    Ort::SessionOptions mso;
+    mso.SetIntraOpNumThreads(1);
+    mso.SetInterOpNumThreads(1);
+    auto mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto t0 = clk::now();
+    Ort::Session aco(menv, matcha_acoustic.c_str(), mso);
+    printf("[matcha] acoustic load %.0fms\n", ms(t0, clk::now()));
+    t0 = clk::now();
+    Ort::Session voc(menv, matcha_vocoder.c_str(), mso);
+    printf("[matcha] vocoder(ort) load %.0fms\n", ms(t0, clk::now()));
+    t0 = clk::now();
+    KpuModel kvoc(matcha_kmodel, "hifigan");
+    printf("[matcha] vocoder(kpu) load %.0fms\n", ms(t0, clk::now()));
+    // optional per-band mel equalization (folded-vocoder input, see
+    // mk_hifigan_eq.py): mel_eq.bin = 160 f32 (80 offsets + 80 scales)
+    // next to the kmodel
+    std::vector<float> eq_c, eq_s;
+    {
+      const std::string dir = matcha_kmodel.substr(0, matcha_kmodel.find_last_of('/'));
+      FILE *f = fopen((dir + "/mel_eq.bin").c_str(), "rb");
+      if (f) {
+        std::vector<float> buf(160);
+        if (fread(buf.data(), 4, 160, f) == 160) {
+          eq_c.assign(buf.begin(), buf.begin() + 80);
+          eq_s.assign(buf.begin() + 80, buf.end());
+        }
+        fclose(f);
+      }
+      printf("[matcha] mel_eq: %s\n", eq_c.empty() ? "none" : "loaded");
+    }
+
+    auto toks = ReadBinary<int64_t>(probe_matcha);
+    const int64_t L = static_cast<int64_t>(toks.size());
+    printf("[matcha] tokens=%ld\n", (long)L);
+    int64_t x_shape[2] = {1, L};
+    int64_t one_shape[1] = {1};
+    int64_t xl = L;
+    float ns = 0.667f, ls = 1.0f;
+    if (getenv("MATCHA_NS")) ns = atof(getenv("MATCHA_NS"));  // sherpa matcha default is 1.0
+    std::vector<float> mel;
+    int64_t Lm = 0;
+    double aco_ms = 0;
+    if (probe_matcha.size() > 4 &&
+        probe_matcha.compare(probe_matcha.size() - 4, 4, ".bin") == 0 &&
+        probe_matcha.find("mel") != std::string::npos && getenv("PROBE_MEL_RAW")) {
+      // raw mel probe: feed a saved mel directly (frame count from the file,
+      // no padding) — the KPU vocoder consumes it as-is (layout [80][frames])
+      auto mf = ReadBinary<float>(probe_matcha);
+      mel.assign(mf.begin(), mf.end());
+      Lm = static_cast<int64_t>(mf.size() / 80);
+      printf("[matcha] PROBE_MEL_RAW: %zu floats -> %ld frames\n", mf.size(), (long)Lm);
+    } else
+    for (int r = 0; r < 2; ++r) {
+      Ort::Value xv = Ort::Value::CreateTensor<int64_t>(mem, toks.data(), toks.size(), x_shape, 2);
+      Ort::Value xlv = Ort::Value::CreateTensor<int64_t>(mem, &xl, 1, one_shape, 1);
+      Ort::Value nsv = Ort::Value::CreateTensor<float>(mem, &ns, 1, one_shape, 1);
+      Ort::Value lsv = Ort::Value::CreateTensor<float>(mem, &ls, 1, one_shape, 1);
+      const char *in[] = {"x", "x_length", "noise_scale", "length_scale"};
+      std::vector<Ort::Value> aco_ins;
+      aco_ins.reserve(4);
+      aco_ins.push_back(std::move(xv));
+      aco_ins.push_back(std::move(xlv));
+      aco_ins.push_back(std::move(nsv));
+      aco_ins.push_back(std::move(lsv));
+      auto a = clk::now();
+      const char *aco_out[] = {"mel"};
+      auto out = aco.Run(Ort::RunOptions{nullptr}, in, aco_ins.data(), 4, aco_out, 1);
+      if (r == 1) aco_ms = ms(a, clk::now());
+      auto info = out[0].GetTensorTypeAndShapeInfo();
+      size_t n_el = info.GetElementCount();
+      const float *p = out[0].GetTensorData<float>();
+      mel.assign(p, p + n_el);
+      Lm = info.GetShape()[2];
+    }
+    printf("[matcha] acoustic %.1fms -> mel[1,80,%ld]\n", aco_ms, (long)Lm);
+    if (Lm > 512) {
+      printf("[matcha] mel L=%ld > 512 bucket: probe truncated\n", (long)Lm);
+    }
+    const int64_t Lc = std::min<int64_t>(Lm, 512);
+
+    // ORT vocoder on the exact-length mel (reference)
+    std::vector<float> wav_ref;
+    double voc_ort_ms = 0;
+    for (int r = 0; r < 2; ++r) {
+      int64_t m_shape[3] = {1, 80, Lc};
+      Ort::Value mv = Ort::Value::CreateTensor<float>(mem, mel.data(), 80 * Lc, m_shape, 3);
+      const char *in[] = {"mel"};
+      auto a = clk::now();
+      const char *voc_out[] = {"audio"};
+      auto out = voc.Run(Ort::RunOptions{nullptr}, in, &mv, 1, voc_out, 1);
+      if (r == 1) voc_ort_ms = ms(a, clk::now());
+      size_t n_el = out[0].GetTensorTypeAndShapeInfo().GetElementCount();
+      const float *p = out[0].GetTensorData<float>();
+      if (r == 1) wav_ref.assign(p, p + n_el);
+    }
+
+    // KPU vocoder input: raw-mel mode feeds the file as-is; otherwise pad
+    // into the 512 bucket with the log-mel silence floor (0 = loudest!)
+    std::vector<float> mel_pad;
+    if (getenv("PROBE_MEL_RAW")) {
+      mel_pad = mel;
+    } else {
+      mel_pad.assign(80 * 512, -12.0f);
+      for (int c = 0; c < 80; ++c)
+        memcpy(&mel_pad[c * 512], &mel[c * Lm], Lc * sizeof(float));
+      if (!eq_c.empty())
+        for (int b = 0; b < 80; ++b)
+          for (int t = 0; t < 512; ++t)
+            mel_pad[b * 512 + t] = (mel_pad[b * 512 + t] - eq_c[b]) * eq_s[b];
+    }
+    std::vector<float> wav_kpu(kvoc.output_bytes(0) / sizeof(float));
+    double voc_kpu_ms = 0, voc_kpu_cpu = 0;
+    for (int r = 0; r < 2; ++r) {
+      auto a = clk::now();
+      clock_t c0 = std::clock();
+      kvoc.Run({mel_pad.data()}, {wav_kpu.data()});
+      if (r == 1) {
+        voc_kpu_ms = ms(a, clk::now());
+        voc_kpu_cpu = 1000.0 * (std::clock() - c0) / CLOCKS_PER_SEC;
+      }
+    }
+
+    const size_t n_cmp = static_cast<size_t>(Lc) * 256;
+    // dump raw outputs for offline cross-correlation analysis
+    {
+      FILE *f = fopen("/tmp/mref.f32", "wb");
+      if (f) { fwrite(wav_ref.data(), 4, std::min(wav_ref.size(), n_cmp + 8192), f); fclose(f); }
+      f = fopen("/tmp/mkpu.f32", "wb");
+      if (f) { fwrite(wav_kpu.data(), 4, wav_kpu.size(), f); fclose(f); }
+      f = fopen("/tmp/mmel.f32", "wb");
+      if (f) { fwrite(mel_pad.data(), 4, mel_pad.size(), f); fclose(f); }
+    }
+    double dot = 0, na = 0, nb = 0, mx = 0;
+    for (size_t i = 0; i < n_cmp; ++i) {
+      const double a = wav_ref[i], b = wav_kpu[i];
+      dot += a * b; na += a * a; nb += b * b;
+      mx = std::max(mx, std::fabs(a - b));
+    }
+    const double cos = dot / (std::sqrt(na * nb) + 1e-30);
+    const double audio_s = static_cast<double>(n_cmp) / 22050.0;
+    printf("[matcha] vocoder ort %.1fms | kpu %.1fms (cpu %.1fms)\n",
+           voc_ort_ms, voc_kpu_ms, voc_kpu_cpu);
+    printf("[matcha] cos=%.6f maxdiff=%.4f over %zu samples (%.2fs audio)\n",
+           cos, mx, n_cmp, audio_s);
+    printf("[matcha] RTF: acoustic=%.3f voc_ort=%.3f voc_kpu=%.3f total(kpu)=%.3f\n",
+           aco_ms / 1000.0 / audio_s, voc_ort_ms / 1000.0 / audio_s,
+           voc_kpu_ms / 1000.0 / audio_s,
+           (aco_ms + voc_kpu_ms) / 1000.0 / audio_s);
+    mmz_shim_release_all();
+    _exit(0);
+  }
   if (daemon_mode) {
     printf("Mode: daemon (resident worker)\n");
   } else {
