@@ -271,6 +271,8 @@ int main(int argc, char *argv[]) {
   std::string matcha_acoustic;
   std::string matcha_vocoder;
   std::string matcha_kmodel;
+  std::string matcha_a_kmodel;
+  std::string matcha_c_kmodel;
   std::string matcha_lexicon;
   std::string matcha_tokens;
 
@@ -299,6 +301,8 @@ int main(int argc, char *argv[]) {
     else if (arg.rfind("--matcha-acoustic=", 0) == 0) matcha_acoustic = arg.substr(18);
     else if (arg.rfind("--matcha-vocoder=", 0) == 0) matcha_vocoder = arg.substr(17);
     else if (arg.rfind("--matcha-kmodel=", 0) == 0) matcha_kmodel = arg.substr(16);
+    else if (arg.rfind("--matcha-a-kmodel=", 0) == 0) matcha_a_kmodel = arg.substr(18);
+    else if (arg.rfind("--matcha-c-kmodel=", 0) == 0) matcha_c_kmodel = arg.substr(18);
     else if (arg.rfind("--matcha-lexicon=", 0) == 0) matcha_lexicon = arg.substr(17);
     else if (arg.rfind("--matcha-tokens=", 0) == 0) matcha_tokens = arg.substr(16);
     else if (arg.rfind("--output=", 0) == 0) out_wav = arg.substr(9);
@@ -310,13 +314,16 @@ int main(int argc, char *argv[]) {
   // ==== matcha say: text -> (greedy longest-match lexicon) -> acoustic CPU
   // ==== -> KPU vocoder -> 22050Hz wav. Needs --matcha-acoustic/kmodel/lexicon.
   if (!matcha_say.empty()) {
-    if (matcha_acoustic.empty() || (matcha_kmodel.empty() && matcha_vocoder.empty()) ||
+    if ((matcha_acoustic.empty() && matcha_a_kmodel.empty()) ||
+        (matcha_kmodel.empty() && matcha_vocoder.empty()) ||
         matcha_lexicon.empty() || matcha_tokens.empty()) {
-      fprintf(stderr, "--matcha-say needs --matcha-acoustic + (kmodel|vocoder) + lexicon/tokens\n");
+      fprintf(stderr, "--matcha-say needs acoustic|a-kmodel + (kmodel|vocoder) + lexicon/tokens\n");
       return 1;
     }
     const bool voc_is_ort = matcha_kmodel.empty();
     const bool voc_dual = !voc_is_ort && getenv("MATCHA_DUAL") != nullptr;
+    // full-KPU mode: A-kmodel (encoder+DP) + CPU one-hot + C128 windows
+    const bool abc_mode = !matcha_a_kmodel.empty() && !matcha_c_kmodel.empty();
     using clk = std::chrono::steady_clock;
     auto ms = [](clk::time_point a, clk::time_point b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
@@ -327,9 +334,16 @@ int main(int argc, char *argv[]) {
     mso.SetIntraOpNumThreads(1);
     mso.SetInterOpNumThreads(1);
     auto mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
-    Ort::Session aco(menv, matcha_acoustic.c_str(), mso);
+    std::unique_ptr<Ort::Session> aco;
+    if (matcha_acoustic.empty() || abc_mode)
+      aco = std::make_unique<Ort::Session>(menv, matcha_acoustic.c_str(), mso);
     std::unique_ptr<KpuModel> kvoc;
     std::unique_ptr<Ort::Session> ovoc;
+    std::unique_ptr<KpuModel> kA, kC;
+    if (abc_mode) {
+      kA = std::make_unique<KpuModel>(matcha_a_kmodel, "matchaA");
+      kC = std::make_unique<KpuModel>(matcha_c_kmodel, "matchaC");
+    }
     if (voc_is_ort || voc_dual)
       ovoc = std::make_unique<Ort::Session>(menv, matcha_vocoder.c_str(), mso);
     if (!voc_is_ort)
@@ -470,12 +484,64 @@ int main(int argc, char *argv[]) {
       vi.push_back(Ort::Value::CreateTensor<float>(mem, &ns, 1, one, 1));
       vi.push_back(Ort::Value::CreateTensor<float>(mem, &ls, 1, one, 1));
       auto a = clk::now();
-      const char *aco_out[] = {"mel"};
-      auto out = aco.Run(Ort::RunOptions{nullptr}, in, vi.data(), 4, aco_out, 1);
-      t_aco += ms(a, clk::now());
-      auto info = out[0].GetTensorTypeAndShapeInfo();
-      const int64_t Lm = info.GetShape()[2];
-      const float *mp = out[0].GetTensorData<float>();
+      std::vector<float> mel_full;   // [80 * Lm] channel-major
+      int64_t Lm = 0;
+      if (abc_mode) {
+        // ===== A (KPU) + B (CPU one-hot) + C128 windows (KPU) =====
+        const int64_t XB = 256, WB = 128;
+        std::vector<int64_t> x_b(XB, 1);
+        memcpy(x_b.data(), ids.data(), L * sizeof(int64_t));
+        int64_t xl256 = XB;             // A was calibrated with full-bucket lens
+        float ls1 = 1.0f;
+        std::vector<float> dur(kA->output_bytes(0) / sizeof(float));   // [1,256]
+        std::vector<float> hid(kA->output_bytes(1) / sizeof(float));   // [1,80,256]
+        kA->Run({x_b.data(), &xl256, &ls1}, {dur.data(), hid.data()});
+        // one-hot: h_up[t] = hid[:, token(t)]
+        const int Ln = (int)L;
+        std::vector<int> lo(Ln), hi(Ln);
+        {
+          double acc = 0;
+          for (int i2 = 0; i2 < Ln; ++i2) {
+            lo[i2] = (int)acc;
+            acc += dur[i2];
+            hi[i2] = (int)llround(acc);
+          }
+        }
+        const int64_t Lp = hi[Ln - 1];
+        mel_full.assign(80 * Lp, 0.0f);
+        std::vector<float> mm(kC->input_bytes(0) / sizeof(float));    // [1,128,80]
+        std::vector<float> mk(kC->input_bytes(1) / sizeof(float));    // [1,1,128]
+        std::vector<float> du(kC->input_bytes(2) / sizeof(float));    // [1,1,256]
+        memcpy(du.data(), dur.data(), XB * sizeof(float));
+        std::vector<float> mwin(kC->output_bytes(0) / sizeof(float)); // [1,80,128]
+        for (int64_t c0 = 0; c0 < Lp; c0 += WB) {
+          const int64_t f = std::min<int64_t>(WB, Lp - c0);
+          std::fill(mm.begin(), mm.end(), 0.0f);
+          std::fill(mk.begin(), mk.end(), 0.0f);
+          for (int n_i = 0; n_i < Ln; ++n_i) {
+            const int a0 = std::max<int64_t>(lo[n_i] - c0, 0);
+            const int b0 = std::min<int64_t>(hi[n_i] - c0, f);
+            for (int t = a0; t < b0; ++t)
+              for (int ch = 0; ch < 80; ++ch)
+                mm[t * 80 + ch] = hid[ch * XB + n_i];
+          }
+          for (int t = 0; t < f; ++t) mk[t] = 1.0f;
+          kC->Run({mm.data(), mk.data(), du.data()}, {mwin.data()});
+          for (int ch = 0; ch < 80; ++ch)
+            memcpy(&mel_full[ch * Lp + c0], &mwin[ch * WB], f * sizeof(float));
+        }
+        Lm = Lp;
+        t_aco += ms(a, clk::now());
+      } else {
+        const char *aco_out[] = {"mel"};
+        auto out = aco->Run(Ort::RunOptions{nullptr}, in, vi.data(), 4, aco_out, 1);
+        t_aco += ms(a, clk::now());
+        auto info = out[0].GetTensorTypeAndShapeInfo();
+        Lm = info.GetShape()[2];
+        const float *mp0 = out[0].GetTensorData<float>();
+        mel_full.assign(mp0, mp0 + 80 * Lm);
+      }
+      const float *mp = mel_full.data();
       if (getenv("MATCHA_DUMP_MEL")) {
         char p[256];
         snprintf(p, sizeof(p), "%s.mel.f32", out_wav.c_str());
