@@ -551,38 +551,33 @@ int main(int argc, char *argv[]) {
               memcpy(&mel_full[ch * Lp + c0], &mwin[ch * WB], f * sizeof(float));
           }
         } else if (cOrt) {
-          // hybrid: A on KPU + C on CPU ORT in 128-frame windows (C128xs
-          // is the verified-correct onnxsim'd static decoder)
-          const int64_t WB = 128;
-          float nsf = ns;
+          // hybrid: A on KPU + C on CPU ORT (Cext, verified bit-exact).
+          // Single full-length call; Cext also needs x/x_length/length_scale.
+          std::vector<float> mm(Lp * 80);
+          std::vector<float> mask(Lp, 1.0f);
+          for (int n_i = 0; n_i < Ln; ++n_i)
+            for (int t = lo[n_i]; t < hi[n_i] && t < Lp; ++t)
+              for (int ch = 0; ch < 80; ++ch)
+                mm[t * 80 + ch] = hid[ch * XB + n_i];
+          float nsf = ns, lsf = 1.0f;
+          int64_t xl = L;
           int64_t one[1] = {1};
+          int64_t mm_shp[3] = {1, Lp, 80};
+          int64_t mk_shp[3] = {1, 1, Lp};
+          int64_t x_shp[2] = {1, XB};
           const char *cins[] = {"/MatMul_output_0", "/Cast_3_output_0",
-                                "noise_scale"};
-          const char *couts[] = {"/decoder/Add_2_output_0"};
-          for (int64_t c0 = 0; c0 < Lp; c0 += WB) {
-            const int64_t f = std::min<int64_t>(WB, Lp - c0);
-            std::vector<float> mm(WB * 80, 0.0f);
-            std::vector<float> mask(WB, 0.0f);
-            for (int n_i = 0; n_i < Ln; ++n_i) {
-              const int a0 = std::max<int64_t>(lo[n_i] - c0, 0);
-              const int b0 = std::min<int64_t>(hi[n_i] - c0, f);
-              for (int t = a0; t < b0; ++t) {
-                mask[t] = 1.0f;
-                for (int ch = 0; ch < 80; ++ch)
-                  mm[t * 80 + ch] = hid[ch * XB + n_i];
-              }
-            }
-            int64_t mm_shp[3] = {1, WB, 80};
-            int64_t mk_shp[3] = {1, 1, WB};
-            std::vector<Ort::Value> cv;
-            cv.push_back(Ort::Value::CreateTensor<float>(mem, mm.data(), mm.size(), mm_shp, 3));
-            cv.push_back(Ort::Value::CreateTensor<float>(mem, mask.data(), mask.size(), mk_shp, 3));
-            cv.push_back(Ort::Value::CreateTensor<float>(mem, &nsf, 1, one, 1));
-            auto cout = cOrt->Run(Ort::RunOptions{nullptr}, cins, cv.data(), 3, couts, 1);
-            const float *mo = cout[0].GetTensorData<float>();
-            for (int ch = 0; ch < 80; ++ch)
-              memcpy(&mel_full[ch * Lp + c0], &mo[ch * WB], f * sizeof(float));
-          }
+                                "noise_scale", "x", "x_length", "length_scale"};
+          const char *couts[] = {"mel"};
+          std::vector<Ort::Value> cv;
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, mm.data(), mm.size(), mm_shp, 3));
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, mask.data(), mask.size(), mk_shp, 3));
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, &nsf, 1, one, 1));
+          cv.push_back(Ort::Value::CreateTensor<int64_t>(mem, x_b.data(), XB, x_shp, 2));
+          cv.push_back(Ort::Value::CreateTensor<int64_t>(mem, &xl, 1, one, 1));
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, &lsf, 1, one, 1));
+          auto cout = cOrt->Run(Ort::RunOptions{nullptr}, cins, cv.data(), 6, couts, 1);
+          const float *mo = cout[0].GetTensorData<float>();
+          memcpy(mel_full.data(), mo, 80 * Lp * sizeof(float));
         }
         Lm = Lp;
         t_aco += ms(a, clk::now());
