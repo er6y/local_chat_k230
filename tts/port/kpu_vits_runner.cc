@@ -273,6 +273,7 @@ int main(int argc, char *argv[]) {
   std::string matcha_kmodel;
   std::string matcha_a_kmodel;
   std::string matcha_c_kmodel;
+  std::string matcha_c_onnx;
   std::string matcha_lexicon;
   std::string matcha_tokens;
 
@@ -303,6 +304,7 @@ int main(int argc, char *argv[]) {
     else if (arg.rfind("--matcha-kmodel=", 0) == 0) matcha_kmodel = arg.substr(16);
     else if (arg.rfind("--matcha-a-kmodel=", 0) == 0) matcha_a_kmodel = arg.substr(18);
     else if (arg.rfind("--matcha-c-kmodel=", 0) == 0) matcha_c_kmodel = arg.substr(18);
+    else if (arg.rfind("--matcha-c-onnx=", 0) == 0) matcha_c_onnx = arg.substr(16);
     else if (arg.rfind("--matcha-lexicon=", 0) == 0) matcha_lexicon = arg.substr(17);
     else if (arg.rfind("--matcha-tokens=", 0) == 0) matcha_tokens = arg.substr(16);
     else if (arg.rfind("--output=", 0) == 0) out_wav = arg.substr(9);
@@ -323,7 +325,8 @@ int main(int argc, char *argv[]) {
     const bool voc_is_ort = matcha_kmodel.empty();
     const bool voc_dual = !voc_is_ort && getenv("MATCHA_DUAL") != nullptr;
     // full-KPU mode: A-kmodel (encoder+DP) + CPU one-hot + C128 windows
-    const bool abc_mode = !matcha_a_kmodel.empty() && !matcha_c_kmodel.empty();
+    const bool abc_mode = !matcha_a_kmodel.empty() &&
+                         (!matcha_c_kmodel.empty() || !matcha_c_onnx.empty());
     using clk = std::chrono::steady_clock;
     auto ms = [](clk::time_point a, clk::time_point b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
@@ -335,14 +338,18 @@ int main(int argc, char *argv[]) {
     mso.SetInterOpNumThreads(1);
     auto mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
     std::unique_ptr<Ort::Session> aco;
-    if (matcha_acoustic.empty() || abc_mode)
+    if (!matcha_acoustic.empty())
       aco = std::make_unique<Ort::Session>(menv, matcha_acoustic.c_str(), mso);
     std::unique_ptr<KpuModel> kvoc;
     std::unique_ptr<Ort::Session> ovoc;
     std::unique_ptr<KpuModel> kA, kC;
+    std::unique_ptr<Ort::Session> cOrt;
     if (abc_mode) {
       kA = std::make_unique<KpuModel>(matcha_a_kmodel, "matchaA");
-      kC = std::make_unique<KpuModel>(matcha_c_kmodel, "matchaC");
+      if (!matcha_c_kmodel.empty())
+        kC = std::make_unique<KpuModel>(matcha_c_kmodel, "matchaC");
+      else
+        cOrt = std::make_unique<Ort::Session>(menv, matcha_c_onnx.c_str(), mso);
     }
     if (voc_is_ort || voc_dual)
       ovoc = std::make_unique<Ort::Session>(menv, matcha_vocoder.c_str(), mso);
@@ -500,35 +507,74 @@ int main(int argc, char *argv[]) {
         const int Ln = (int)L;
         std::vector<int> lo(Ln), hi(Ln);
         {
-          double acc = 0;
+          // float cumsum (same as the graph's internal length regulator);
+          // boundaries use ceil to match the graph's Range+Less construction
+          float acc = 0;
           for (int i2 = 0; i2 < Ln; ++i2) {
             lo[i2] = (int)acc;
             acc += dur[i2];
-            hi[i2] = (int)llround(acc);
+            hi[i2] = (int)acc;
           }
+          if (hi[Ln - 1] < (int)acc) hi[Ln - 1] = (int)acc;  // ceil for last
         }
-        const int64_t Lp = hi[Ln - 1];
+        // total length = ceil of the raw float sum (matches ReduceSum->Ceil),
+        // then round UP to a multiple of 4 (U-Net stride-2 down/up needs even
+        // lengths at every level; odd totals break the skip-connection Concat)
+        float dsum = 0;
+        for (int i2 = 0; i2 < Ln; ++i2) dsum += dur[i2];
+        int64_t Lp = (int64_t)std::ceil(dsum);
+        if (Lp % 4 != 0) Lp = ((Lp / 4) + 1) * 4;
+        hi[Ln - 1] = (int)Lp;  // extend last token to cover the pad
         mel_full.assign(80 * Lp, 0.0f);
-        std::vector<float> mm(kC->input_bytes(0) / sizeof(float));    // [1,128,80]
-        std::vector<float> mk(kC->input_bytes(1) / sizeof(float));    // [1,1,128]
-        std::vector<float> du(kC->input_bytes(2) / sizeof(float));    // [1,1,256]
-        memcpy(du.data(), dur.data(), XB * sizeof(float));
-        std::vector<float> mwin(kC->output_bytes(0) / sizeof(float)); // [1,80,128]
-        for (int64_t c0 = 0; c0 < Lp; c0 += WB) {
-          const int64_t f = std::min<int64_t>(WB, Lp - c0);
-          std::fill(mm.begin(), mm.end(), 0.0f);
-          std::fill(mk.begin(), mk.end(), 0.0f);
-          for (int n_i = 0; n_i < Ln; ++n_i) {
-            const int a0 = std::max<int64_t>(lo[n_i] - c0, 0);
-            const int b0 = std::min<int64_t>(hi[n_i] - c0, f);
-            for (int t = a0; t < b0; ++t)
+        if (kC) {
+          // full-KPU: C in 128-frame windows
+          const int64_t WB = 128;
+          std::vector<float> mm(kC->input_bytes(0) / sizeof(float));
+          std::vector<float> mk(kC->input_bytes(1) / sizeof(float));
+          std::vector<float> du(kC->input_bytes(2) / sizeof(float));
+          memcpy(du.data(), dur.data(), XB * sizeof(float));
+          std::vector<float> mwin(kC->output_bytes(0) / sizeof(float));
+          for (int64_t c0 = 0; c0 < Lp; c0 += WB) {
+            const int64_t f = std::min<int64_t>(WB, Lp - c0);
+            std::fill(mm.begin(), mm.end(), 0.0f);
+            std::fill(mk.begin(), mk.end(), 0.0f);
+            for (int n_i = 0; n_i < Ln; ++n_i) {
+              const int a0 = std::max<int64_t>(lo[n_i] - c0, 0);
+              const int b0 = std::min<int64_t>(hi[n_i] - c0, f);
+              for (int t = a0; t < b0; ++t)
+                for (int ch = 0; ch < 80; ++ch)
+                  mm[t * 80 + ch] = hid[ch * XB + n_i];
+            }
+            for (int t = 0; t < f; ++t) mk[t] = 1.0f;
+            kC->Run({mm.data(), mk.data(), du.data()}, {mwin.data()});
+            for (int ch = 0; ch < 80; ++ch)
+              memcpy(&mel_full[ch * Lp + c0], &mwin[ch * WB], f * sizeof(float));
+          }
+        } else if (cOrt) {
+          // hybrid: A on KPU + C on CPU ORT (full length, single call)
+          std::vector<float> mm(Lp * 80);
+          for (int n_i = 0; n_i < Ln; ++n_i)
+            for (int t = lo[n_i]; t < hi[n_i]; ++t)
               for (int ch = 0; ch < 80; ++ch)
                 mm[t * 80 + ch] = hid[ch * XB + n_i];
-          }
-          for (int t = 0; t < f; ++t) mk[t] = 1.0f;
-          kC->Run({mm.data(), mk.data(), du.data()}, {mwin.data()});
-          for (int ch = 0; ch < 80; ++ch)
-            memcpy(&mel_full[ch * Lp + c0], &mwin[ch * WB], f * sizeof(float));
+          std::vector<float> mask(Lp, 1.0f);
+          int64_t mm_shp[3] = {1, Lp, 80};
+          int64_t mk_shp[3] = {1, 1, Lp};
+          int64_t du_shp[3] = {1, 1, XB};
+          int64_t one[1] = {1};
+          float nsf = ns;
+          const char *cins[] = {"/MatMul_output_0", "/Cast_3_output_0",
+                                "/Mul_1_output_0", "noise_scale"};
+          const char *couts[] = {"/decoder/Add_2_output_0"};
+          std::vector<Ort::Value> cv;
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, mm.data(), mm.size(), mm_shp, 3));
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, mask.data(), mask.size(), mk_shp, 3));
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, dur.data(), XB, du_shp, 3));
+          cv.push_back(Ort::Value::CreateTensor<float>(mem, &nsf, 1, one, 1));
+          auto cout = cOrt->Run(Ort::RunOptions{nullptr}, cins, cv.data(), 4, couts, 1);
+          const float *mo = cout[0].GetTensorData<float>();
+          // C-dyn output is the ODE result — same layout [1,80,L']
+          memcpy(mel_full.data(), mo, 80 * Lp * sizeof(float));
         }
         Lm = Lp;
         t_aco += ms(a, clk::now());
