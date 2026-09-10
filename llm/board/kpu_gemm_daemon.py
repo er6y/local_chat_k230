@@ -10,6 +10,7 @@ response: MAGIC u32 | code u32  | y[mt*OUT] f32   (code 0 = ok)
 stem = e.g. "l0_q". mt<=16 -> S4 kmodel (s4_sq), else S16 (s16_sq).
 Fold + smoothquant compensation happen here; caller sends raw x[m][k]."""
 import os
+import mmap
 import signal
 import socket
 import time
@@ -23,10 +24,11 @@ import nncaseruntime as nn
 SOCK = "/tmp/kpu_gemm.sock"
 D_S1 = "/mnt/data/kpu_qwen/s1_sq"    # M=1 exact tile: pure weight-DMA floor
 D_S4 = "/mnt/data/kpu_qwen/s4_sq"
-D_S16 = "/mnt/data/kpu_qwen/s16_sq"
-# measured per-interpreter CMA: S1 ~3.6MB, S4 ~6.4MB. Budget ~850MB of the
-# 1GB pool: S1 full set (196x3.6=706MB, decode never thrashes) + S4 20-slot
-# LRU (128MB; prefill passes thrash through it, tolerable once per prompt).
+D_S16 = "/mnt/data/kpu_qwen/s16b"    # era-B 重导出（mk_sq16b.py，W*s + x/s）；老 s16_sq 是 era-A 方向，乱码
+# 内存实测（2026-09，drop_caches 后）：S16 era-B 全量 196 个 = 450MB
+# （2.29MB/interp），加载 21s；载完 CmaFree 仍余 438MB，与 TTS（~150MB）
+# 共存无压力。此前的"装不下"是页缓存挤占 CMA 区的假象（drop_caches 回收
+# ~320MB）。生产静态配比：CAP16=196, CAP4=0, CAP1=0（decode M<32 走 CPU）。
 CAPS = {1: int(os.environ.get("KPUD_CAP1", "196")),
         4: int(os.environ.get("KPUD_CAP4", "20")),
         16: int(os.environ.get("KPUD_CAP16", "0"))}
@@ -53,16 +55,28 @@ def get_interp(stem, S):
     path = f"{d}/{stem}.kmodel"
     if not os.path.exists(path):
         return None
+    if CAPS[S] <= 0:          # 容量 0 = 该层完全不 serve（如 CAP1=0 省 700MB
+        return None           # CMA，llmd 劫持只吃 M>=32 的 S4 prefill 时用）
     # two-tier LRU: the S=1 decode set stays fully resident (per-interpreter
     # ~3MB -> 196 x 3 = 590MB fits the 1GB CMA; zero reload thrash per token).
     # S=4 prefill set caps low (~6.4MB/interp would need 1.25GB for all 196);
     # prefill LRU-thrashes instead - one pass per prompt tolerates it.
+    # 驱逐=释放解释器，实测这条路径会段错误（nncase/mmz 释放即崩），一崩
+    # 客户端拿到错误码、若客户端没回退就直接输出未初始化内存（乱码根因）。
+    # 所以改成"满容量直接拒绝"，让客户端回退 CPU：慢但永远正确。
     if len([k for k in order if k[1] == S]) >= CAPS[S]:
-        victim = next(k for k in order if k[1] == S)
-        order.remove(victim)
-        cache.pop(victim, None)
+        log(f"REFUSED {path}: S{S} at cap {CAPS[S]} (no evict: free crashes)")
+        return None
     interp = nn.Interpreter()
-    interp.load_model(open(path, "rb").read())
+    try:
+        data = _read_kmodel_nocache(path)
+        interp.load_model(data)
+        del data
+    except Exception as e:
+        # CMA 耗尽/坏文件：跳过该 GEMM（客户端 CPU 回退），绝不让单个加载
+        # 失败炸掉整个 daemon——崩溃死亡会泄漏全部已载 mmz 段，恶性循环
+        log(f"LOAD FAIL {path}: {e}")
+        return None
     sh = [int(v) for v in interp.get_input_shape(0)]
     outsh = [int(v) for v in interp.get_output_shape(0)]
     cache[key] = interp
@@ -81,6 +95,52 @@ def load_scale(stem, S):
 
 
 SCALES = {}
+
+
+def _read_kmodel_nocache(path):
+    """普通读 + 立即 fadvise 驱逐页缓存。读缓存在两次加载间被消化，
+    zone 高阶块留得住（196 个 22.9s 全量通过实测）。
+    O_DIRECT 变体（KPUD_ODIRECT=1）在本板 ext4+mmc 栈上会 EINVAL 甚至
+    挂死（实录），默认禁用；仅块设备裸读验证过可行。"""
+    if os.environ.get("KPUD_ODIRECT") == "1":
+        size = os.path.getsize(path)
+        try:
+            return _read_odirect(path, size)
+        except Exception as e:
+            log(f"ODIRECT failed {path}: {e!r}")
+    with open(path, "rb") as f:
+        data = f.read()
+        try:
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+    return data
+
+
+def _read_odirect(path, size):
+    for blk in (4096, 512):
+        n_al = (size // blk) * blk
+        if n_al == 0:
+            continue
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
+        try:
+            buf = mmap.mmap(-1, n_al)
+            mv = memoryview(buf)
+            off = 0
+            while off < n_al:
+                n = os.preadv(fd, [mv[off:]], off)
+                if n <= 0:
+                    break
+                off += n
+            tail = b""
+            if size > n_al:
+                tail = os.pread(fd, size - n_al, n_al)
+            if off < n_al:
+                raise ValueError("short read")
+            return bytes(buf[:off]) + tail
+        finally:
+            os.close(fd)
+    raise ValueError("empty")
 
 
 def handle(stem, mt, x):
@@ -104,9 +164,9 @@ def handle(stem, mt, x):
     inp = np.zeros((1, K, MT), dtype=np.float32)
     inp[0, :, :mt] = xm.T          # [K, mt]
     if sc is not None:
-        # classic SmoothQuant direction: shrink outlier channels (x/s);
-        # the kmodel has W*s baked. The old x*s direction AMPLIFIED outliers
-        # and was the root cause of the garbled output (down GEMMs died).
+        # 2026-09-09 定案：s4_sq 与 重导出的 s16b（mk_sq16b.py）同为 era-B
+        # （kmodel 内 W*s，fold 除法 x/s）。老 s16_sq 是 era-A（W/s + x*s）
+        # 已弃用。selftest 探针回灌对域盲，不能当方向判据。
         inp[0, :, :mt] /= sc.reshape(K, 1)
     inp = inp.reshape(1, K, S, S)
     _t_f1 = time.time_ns()
@@ -145,17 +205,51 @@ def serve():
             log("sched fifo skipped:", e)
     log(f"listening on {SOCK}; tier caps {CAPS}")
     if os.environ.get("KPUD_WARM", "1") == "1":
-        # pre-load the full S1 decode set once (~6-10s): first token is not
-        # 196 serial loads, and any CMA overflow surfaces HERE, deterministically
-        t0 = time.time_ns()
-        n = 0
-        for li in range(28):
-            for tag in ("q", "k", "v", "o", "gate", "up", "down"):
-                if get_interp(f"l{li}_{tag}", 1):
-                    n += 1
-        log(f"warmed {n} S1 interpreters in {(time.time_ns()-t0)/1e9:.1f}s "
-            f"CmaFree={open('/proc/meminfo').read().split('CmaFree:')[1].split()[0]}kB")
+        # 静态预载：启动时把所有需要的解释器全部加载进 CMA，之后零动态加载。
+        # 实测（s16b, drop_caches 后）：196 × 2.29MB = 450MB，21s 加载完。
+        # 注意：必须先 drop_caches——页缓存会挤进 CMA 区不迁走，320MB 假占用
+        # 曾经把可用池压到 576MB，导致全量驻留误判为"内存不够"。
+        #
+        # 每个 interpreter 还要做一次 warm-run（零输入跑一遍）：
+        # 1) vendor runtime 的首跑会懒分配运行期缓冲（dmesg 实录：GNNE 驱动
+        #    在 run 期做 order:10 GFP_KERNEL 连续 4MB 分配，llm 的 700MB 页
+        #    缓存把普通区碎片化后分配失败 -> runtime 不查错误直接段错误）。
+        #    在内存最干净的窗口把这些分配全部逼出来。
+        # 2) 开机即全量验证 196 个 kmodel，坏导出在启动时暴露而不是对话中途。
         import gc
+        t0 = time.monotonic()
+        for S in (16, 4, 1):
+            if CAPS[S] <= 0:
+                continue
+            n = ok = 0
+            for li in range(28):
+                for tag in ("q", "k", "v", "o", "gate", "up", "down"):
+                    stem = f"l{li}_{tag}"
+                    it = get_interp(stem, S)
+                    if it is None:
+                        continue
+                    n += 1
+                    try:
+                        # 逐个"加载+试跑"交替：读缓存在两次加载之间被
+                        # fadvise/回收消化，zone 高阶块始终留得住——
+                        # 两段式（先全加载再统一试跑）实测必段错误
+                        sh = [int(v) for v in it.get_input_shape(0)]
+                        zt = np.zeros(sh, np.float32)
+                        tt = nn.RuntimeTensor.from_numpy(zt)
+                        it.set_input_tensor(0, tt)
+                        it.run()
+                        ot = it.get_output_tensor(0)
+                        oarr = ot.to_numpy()
+                        del ot, oarr, tt, zt
+                        ok += 1
+                    except Exception as e:
+                        # 单个坏 kmodel 不拖垮整体：留在表里，真实请求时该
+                        # GEMM 客户端会走 CPU 回退（handle 内同样有 try）
+                        log(f"WARMRUN FAIL {stem}: {e}")
+            log(f"warmed {ok}/{n} S{S} interpreters (load+run) in "
+                f"{time.monotonic()-t0:.1f}s CmaFree="
+                f"{open('/proc/meminfo').read().split('CmaFree:')[1].split()[0]}kB")
+            t0 = time.monotonic()
         gc.collect()
         gc.freeze()          # warmed interpreters become permanent: no GC scans
         gc.disable()         # kill periodic collector pauses in the serve loop
@@ -168,7 +262,7 @@ def serve():
     while True:
         conn, _ = sk.accept()
         try:
-            conn.settimeout(120)
+            conn.settimeout(45)   # GNNE 卡死时尽快释放这条连接（客户端 30s 先超时回退）
             with conn:
                 while True:
                     hdr = recvn(conn, 4 + 2)

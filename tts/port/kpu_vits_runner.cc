@@ -24,8 +24,10 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <map>
 #include <vector>
 #include <unistd.h>
+#include <sys/resource.h>
 
 #include <nncase/runtime/interpreter.h>
 #include <nncase/runtime/runtime_op_utility.h>
@@ -37,6 +39,8 @@
 #include "kaldifst/csrc/text-normalizer.h"
 #include "sherpa-onnx/csrc/lexicon.h"
 #include "sherpa-onnx/csrc/wave-writer.h"
+#include "sherpa-onnx/csrc/piper-phonemize-lexicon.h"
+#include "sherpa-onnx/csrc/offline-tts-vits-model-meta-data.h"
 #include "k230_init.h"
 #include "mmz.h"
 
@@ -48,13 +52,23 @@ using namespace nncase::runtime;
 
 class KpuModel {
  public:
-  explicit KpuModel(const std::string &kmodel_path, const char *tag) {
+  explicit KpuModel(const std::string &kmodel_path, const char *tag)
+      : path_(kmodel_path) {
     std::ifstream ifs(kmodel_path, std::ios::binary);
     if (!ifs.is_open()) {
       fprintf(stderr, "[KPU:%s] Error: Failed to open %s\n", tag, kmodel_path.c_str());
       exit(1);
     }
-    interp_.load_model(ifs).expect("[KPU] Invalid kmodel");
+    // Load with copy_buffer=true: the gnne program section must stay valid for
+    // the whole model lifetime (stream-loaded sections were observed unmapped
+    // at first gnne_enable -> SIGSEGV in the cstage staging memcpy).
+    kmodel_buf_.assign(std::istreambuf_iterator<char>(ifs),
+                       std::istreambuf_iterator<char>());
+    interp_.load_model(gsl::span<const gsl::byte>(
+                           reinterpret_cast<const gsl::byte *>(kmodel_buf_.data()),
+                           (gsl::span<const gsl::byte>::size_type)kmodel_buf_.size()),
+                       true)
+        .expect("[KPU] Invalid kmodel");
 
     for (size_t i = 0; i < interp_.inputs_size(); ++i) {
       auto desc = interp_.input_desc(i);
@@ -91,13 +105,17 @@ class KpuModel {
 
   size_t input_count() const { return input_ptrs_.size(); }
   size_t output_count() const { return output_ptrs_.size(); }
+  const std::string &path() const { return path_; }
 
   size_t input_bytes(size_t i) const { return input_bytes_[i]; }
   size_t output_bytes(size_t i) const { return output_bytes_[i]; }
 
   // byte sizes derived from the kmodel IO descriptors
   void Run(const std::vector<const void *> &in, const std::vector<void *> &out) {
-    for (size_t i = 0; i < in.size(); ++i) {
+    // models whose unused inputs (e.g. vestigial sid) were compiled away may
+    // expose fewer inputs than the caller feeds — bind by position, capped
+    size_t ni = std::min(in.size(), input_ptrs_.size());
+    for (size_t i = 0; i < ni; ++i) {
       memcpy(input_ptrs_[i], in[i], input_bytes_[i]);
       kd_mpi_sys_mmz_flush_cache(0, input_ptrs_[i], static_cast<uint32_t>(input_bytes_[i]));
       host_runtime_tensor::sync(input_tensors_[i], sync_write_back, true).expect("[KPU] input sync failed");
@@ -110,6 +128,8 @@ class KpuModel {
   }
 
  private:
+  std::string path_;
+  std::vector<char> kmodel_buf_;  // copied model buffer; must outlive interp_
   interpreter interp_;
   std::vector<runtime_tensor> input_tensors_;
   std::vector<mapped_buffer> input_maps_;
@@ -120,6 +140,140 @@ class KpuModel {
   std::vector<void *> output_ptrs_;
   std::vector<size_t> output_bytes_;
 };
+
+// One-shot KPU invocation with scoped model lifetime: load -> run -> free.
+// 9 concurrently-resident interpreters (~130MB of pool) segfault inside
+// gnne_enable (cstage staging), so multi-piece chains keep a single kmodel
+// resident at a time.
+static std::vector<float> KpuRunScoped(const std::string &path, const char *tag,
+                                       const std::vector<const void *> &in) {
+  KpuModel k(path, tag);
+  std::vector<float> out(k.output_bytes(0) / sizeof(float));
+  fprintf(stderr, "[chain] %s in0=%zu out0=%zu\n", path.c_str(), k.input_bytes(0),
+          k.output_bytes(0));
+  k.Run(in, {out.data()});
+  return out;
+}
+
+// Scoped run with SIZE-MATCHED feeds: kmodel IO order is not discoverable at
+// runtime (tensor_desc has no name), so bind z-sized, mask-sized and sid
+// inputs by their byte sizes instead of assuming descriptor order.
+static std::vector<float> KpuRunScopedFlow(const std::string &path, const char *tag,
+                                           const std::vector<float> &in0,
+                                           const std::vector<float> &m, int64_t sid0) {
+  KpuModel k(path, tag);
+  std::vector<const void *> feeds(k.input_count(), &sid0);
+  for (size_t i = 0; i < k.input_count(); ++i) {
+    if (k.input_bytes(i) == in0.size() * sizeof(float))
+      feeds[i] = in0.data();
+    else if (!m.empty() && k.input_bytes(i) == m.size() * sizeof(float))
+      feeds[i] = m.data();
+  }
+  std::vector<float> out(k.output_bytes(0) / sizeof(float));
+  fprintf(stderr, "[chain] %s in0=%zu out0=%zu\n", path.c_str(), k.input_bytes(0),
+          k.output_bytes(0));
+  k.Run(feeds, {out.data()});
+  return out;
+}
+
+// (cur,sid) KPU piece-chain with an optional mid-chain CPU splice:
+// group A pieces run on KPU from cur, then cpu_ses (if set) maps cur -> cur
+// (f32, shape from the session's own input descriptor), then group B pieces
+// run on KPU. The '|' in --melo-subgen separates the two KPU groups.
+static std::vector<float> RunChainKpuCpuKpu(const std::vector<std::string> &gA,
+                                            const std::vector<std::string> &gB,
+                                            Ort::Session *cpu_ses,
+                                            std::vector<float> cur, int64_t sid0) {
+  for (size_t p = 0; p < gA.size(); ++p)
+    cur = KpuRunScoped(gA[p], "meloPA", {cur.data(), &sid0});
+  if (cpu_ses) {
+    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto ish = cpu_ses->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    int64_t shp[3] = {1, ish[1], ish[2]};
+    int64_t one[1] = {1};
+    const char *in_names[] = {"/dec/LeakyRelu_3_output_0", "sid"};
+    const char *out_names[] = {"/dec/LeakyRelu_5_output_0"};
+    std::vector<Ort::Value> iv;
+    iv.push_back(Ort::Value::CreateTensor<float>(mem, (float *)cur.data(), cur.size(), shp, 3));
+    iv.push_back(Ort::Value::CreateTensor<int64_t>(mem, &sid0, 1, one, 1));
+    auto ov = cpu_ses->Run(Ort::RunOptions{nullptr}, in_names, iv.data(), 2, out_names, 1);
+    size_t n = (size_t)ov[0].GetTensorTypeAndShapeInfo().GetElementCount();
+    std::vector<float> out(n);
+    memcpy(out.data(), ov[0].GetTensorData<float>(), n * sizeof(float));
+    cur.swap(out);
+  }
+  for (size_t p = 0; p < gB.size(); ++p)
+    cur = KpuRunScoped(gB[p], "meloPB", {cur.data(), &sid0});
+  return cur;
+}
+
+// Resident-model variant of RunChainKpuCpuKpu (models stay loaded across
+// sentences; loading all pieces per sentence costs ~15s of file IO each).
+static std::vector<float> RunChainResident(const std::vector<KpuModel *> &gA,
+                                           const std::vector<KpuModel *> &gB,
+                                           Ort::Session *cpu_ses,
+                                           std::vector<float> cur, int64_t sid0) {
+  using clk = std::chrono::steady_clock;
+  for (size_t p = 0; p < gA.size(); ++p) {
+    auto t0 = clk::now();
+    std::vector<float> nxt(gA[p]->output_bytes(0) / sizeof(float));
+    gA[p]->Run({cur.data(), &sid0}, {nxt.data()});
+    fprintf(stderr, "[chain-t] %s %.1f ms\n", gA[p]->path().c_str(),
+            std::chrono::duration<double, std::milli>(clk::now() - t0).count());
+    cur.swap(nxt);
+  }
+  if (cpu_ses) {
+    auto t0 = clk::now();
+    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto ish = cpu_ses->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    int64_t shp[3] = {1, ish[1], ish[2]};
+    int64_t one[1] = {1};
+    const char *in_names[] = {"/dec/LeakyRelu_3_output_0", "sid"};
+    const char *out_names[] = {"/dec/LeakyRelu_5_output_0"};
+    std::vector<Ort::Value> iv;
+    iv.push_back(Ort::Value::CreateTensor<float>(mem, (float *)cur.data(), cur.size(), shp, 3));
+    iv.push_back(Ort::Value::CreateTensor<int64_t>(mem, &sid0, 1, one, 1));
+    auto ov = cpu_ses->Run(Ort::RunOptions{nullptr}, in_names, iv.data(), 2, out_names, 1);
+    size_t n = (size_t)ov[0].GetTensorTypeAndShapeInfo().GetElementCount();
+    std::vector<float> out(n);
+    memcpy(out.data(), ov[0].GetTensorData<float>(), n * sizeof(float));
+    fprintf(stderr, "[chain-t] MIDCPU %.1f ms\n",
+            std::chrono::duration<double, std::milli>(clk::now() - t0).count());
+    cur.swap(out);
+  }
+  for (size_t p = 0; p < gB.size(); ++p) {
+    auto t0 = clk::now();
+    std::vector<float> nxt(gB[p]->output_bytes(0) / sizeof(float));
+    gB[p]->Run({cur.data(), &sid0}, {nxt.data()});
+    fprintf(stderr, "[chain-t] %s %.1f ms\n", gB[p]->path().c_str(),
+            std::chrono::duration<double, std::milli>(clk::now() - t0).count());
+    cur.swap(nxt);
+  }
+  return cur;
+}
+
+// parse "a,b,c|d,e" into [[a,b,c],[d,e]]
+static std::vector<std::vector<std::string>> ParseSubgenGroups(const std::string &s) {
+  std::vector<std::vector<std::string>> groups;
+  std::vector<std::string> cur;
+  std::string acc;
+  auto flush_item = [&]() {
+    if (!acc.empty()) cur.push_back(acc);
+    acc.clear();
+  };
+  auto flush_group = [&]() {
+    flush_item();
+    if (!cur.empty()) groups.push_back(cur);
+    cur.clear();
+  };
+  for (char c : s) {
+    if (c == ',') flush_item();
+    else if (c == '|') flush_group();
+    else acc += c;
+  }
+  flush_group();
+  return groups;
+}
 
 template <typename T>
 static std::vector<T> ReadBinary(const std::string &path) {
@@ -218,8 +372,108 @@ int main(int argc, char *argv[]) {
     _exit(rc);
   }
   bool daemon_mode = false;
+  if (argc >= 2 && std::string(argv[1]) == "--probe-melo") {
+    // subgen kmodel numerical probe: <dir>/z.f32 [192*256], m.f32 [256] ->
+    // <dir>/y.f32 (compare against the x86 f32 reference on PC!)
+    if (argc != 4) {
+      fprintf(stderr, "Usage: %s --probe-melo <subgen.kmodel> <dir>\n", argv[0]);
+      return 1;
+    }
+    k230_kpu_init();
+    KpuModel ks(argv[2], "meloP");
+    auto z = ReadBinary<float>(std::string(argv[3]) + "/z.f32");
+    auto m = ReadBinary<float>(std::string(argv[3]) + "/m.f32");
+    if (z.size() != 192 * 256 || m.size() != 256) {
+      fprintf(stderr, "probe-melo size mismatch: z=%zu m=%zu\n", z.size(), m.size());
+      return 1;
+    }
+    int64_t sid0 = 0;
+    std::vector<float> y(ks.output_bytes(0) / sizeof(float));
+    {
+      // size-matched feeds: bind z/m/sid by byte size, not descriptor order
+      std::vector<const void *> feeds(ks.input_count(), &sid0);
+      for (size_t i = 0; i < ks.input_count(); ++i) {
+        if (ks.input_bytes(i) == z.size() * sizeof(float)) feeds[i] = z.data();
+        else if (ks.input_bytes(i) == m.size() * sizeof(float)) feeds[i] = m.data();
+      }
+      ks.Run(feeds, {y.data()});
+    }
+    FILE *f = fopen((std::string(argv[3]) + "/y.f32").c_str(), "wb");
+    if (!f) { perror("fopen"); return 1; }
+    fwrite(y.data(), 4, y.size(), f);
+    fclose(f);
+    printf("[probe-melo] wrote y.f32 (%zu floats)\n", y.size());
+    mmz_shim_release_all();
+    _exit(0);
+  }
   if (argc >= 2 && std::string(argv[1]) == "--daemon") {
     daemon_mode = true;
+  } else if (argc >= 2 && std::string(argv[1]) == "--probe-est") {
+    // est128 kmodel probe: reads <dir>/mm.f32 [128*80], mask.f32 [128],
+    // mu.f32 [80*128]; runs 3 Euler steps (t=0,1/3,2/3, z = randn*ns from
+    // MATCHA_NS, 0 default) and writes <dir>/mel.f32 [80*128] (denormalized).
+    if (argc != 4) {
+      fprintf(stderr, "Usage: %s --probe-est <est.kmodel> <dir>\n", argv[0]);
+      return 1;
+    }
+    k230_kpu_init();
+    // optional: reproduce the runner context (ORT session created, then KpuModel,
+    // then an ORT inference, then KPU runs) to test ORT->KPU interference
+    std::unique_ptr<Ort::Session> pw_aco;
+    if (getenv("PROBE_ORT_WARM")) {
+      Ort::Env menv(ORT_LOGGING_LEVEL_WARNING, "probew");
+      Ort::SessionOptions mso;
+      mso.SetIntraOpNumThreads(1);
+      mso.SetInterOpNumThreads(1);
+      pw_aco = std::make_unique<Ort::Session>(menv, getenv("PROBE_ORT_WARM"), mso);
+    }
+    KpuModel ke(argv[2], "est");
+    if (pw_aco) {
+      const int64_t shp[2] = {1, 21};
+      std::vector<int64_t> ids(21, 1);
+      int64_t xl = 21;
+      float nsf = 0.f, lsf = 1.f;
+      int64_t one[1] = {1};
+      const char *pin[] = {"x", "x_length", "noise_scale", "length_scale"};
+      auto memi = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+      std::vector<Ort::Value> pv;
+      pv.push_back(Ort::Value::CreateTensor<int64_t>(memi, ids.data(), ids.size(), shp, 2));
+      pv.push_back(Ort::Value::CreateTensor<int64_t>(memi, &xl, 1, one, 1));
+      pv.push_back(Ort::Value::CreateTensor<float>(memi, &nsf, 1, one, 1));
+      pv.push_back(Ort::Value::CreateTensor<float>(memi, &lsf, 1, one, 1));
+      const char *pout[] = {"/MatMul_output_0"};
+      auto r = pw_aco->Run(Ort::RunOptions{nullptr}, pin, pv.data(), 4, pout, 1);
+      printf("[probe-est] ORT warmup done\n");
+    }
+    auto mm = ReadBinary<float>(std::string(argv[3]) + "/mm.f32");
+    auto mk = ReadBinary<float>(std::string(argv[3]) + "/mask.f32");
+    auto mu = ReadBinary<float>(std::string(argv[3]) + "/mu.f32");
+    if (mm.size() != 128 * 80 || mk.size() != 128 || mu.size() != 80 * 128) {
+      fprintf(stderr, "probe-est size mismatch: mm=%zu mask=%zu mu=%zu\n",
+              mm.size(), mk.size(), mu.size());
+      return 1;
+    }
+    // mm is [128,80] t-major; kmodel wants x/mu [80,128] ch-major
+    std::vector<float> x(80 * 128), muT(80 * 128), v(80 * 128);
+    for (int t = 0; t < 128; ++t)
+      for (int ch = 0; ch < 80; ++ch) muT[ch * 128 + t] = mm[t * 80 + ch];
+    float ns = getenv("MATCHA_NS") ? (float)atof(getenv("MATCHA_NS")) : 0.0f;
+    std::mt19937 rng(42);
+    std::normal_distribution<float> g(0.f, ns);
+    for (auto &e : x) e = g(rng);
+    for (int k = 0; k < 3; ++k) {
+      float t = k / 3.0f;
+      ke.Run({x.data(), mk.data(), muT.data(), &t}, {v.data()});
+      for (int i = 0; i < 80 * 128; ++i) x[i] += v[i] / 3.0f;
+    }
+    for (int i = 0; i < 80 * 128; ++i) x[i] = x[i] * 2.7628188f - 5.9870973f;
+    FILE *f = fopen((std::string(argv[3]) + "/mel.f32").c_str(), "wb");
+    if (!f) { perror("fopen"); return 1; }
+    fwrite(x.data(), 4, x.size(), f);
+    fclose(f);
+    printf("[probe-est] wrote mel.f32\n");
+    mmz_shim_release_all();
+    _exit(0);
   } else if (argc < 2) {
     fprintf(stderr,
             "Usage: %s <text> [options]\n"
@@ -274,8 +528,33 @@ int main(int argc, char *argv[]) {
   std::string matcha_a_kmodel;
   std::string matcha_c_kmodel;
   std::string matcha_c_onnx;
+  std::string matcha_est_kmodel;  // single-step decoder (estimator) on KPU
+  std::string probe_est;          // dir with mm.f32/mask.f32/mu.f32 -> mel.f32
+  std::string melo_say;           // melo: text -> pregen CPU + subgen KPU
+  std::string piper_say;          // piper: text -> espeak phonemize + KPU chain
+  std::string piper_dir;          // dir with piper kmodels/tokens/espeak data
+  std::string piper_tokens_file;  // optional: precomputed ids (.i64) to bypass
+                                  // espeak frontend (eval/debug)
+  std::string melo_pregen;
+  std::string melo_flow;          // f32 CPU onnx: z_pre+mask+sid -> z_hat
+                                  // (attention-heavy flow stays on CPU; the
+                                  // K230 GNNE mis-executes its dynamic MatMuls)
+  std::string melo_midcpu;        // f32 CPU onnx spliced into the KPU chain at
+                                  // the '|' boundary of --melo-subgen
+                                  // (dq4+dq5's ups/resblocks also mis-execute)
+  std::string melo_subgen;
+  std::string melo_lexicon;
+  std::string melo_tokens;
+  std::string probe_chain;        // dir with z.f32/m.f32 -> run whole subgen
+                                  // chain (no pregen) -> chain.f32 (numerical
+                                  // gate vs x86 ONNX reference on PC)
   std::string matcha_lexicon;
   std::string matcha_tokens;
+
+  // argv[1] is normally <text>; only the --probe-chain mode may live there
+  // (the loop below starts at i=2).
+  if (argc >= 2 && std::string(argv[1]).rfind("--probe-chain=", 0) == 0)
+    probe_chain = std::string(argv[1]).substr(14);
 
   for (int i = 2; i < argc; ++i) {
     std::string arg = argv[i];
@@ -305,12 +584,1318 @@ int main(int argc, char *argv[]) {
     else if (arg.rfind("--matcha-a-kmodel=", 0) == 0) matcha_a_kmodel = arg.substr(18);
     else if (arg.rfind("--matcha-c-kmodel=", 0) == 0) matcha_c_kmodel = arg.substr(18);
     else if (arg.rfind("--matcha-c-onnx=", 0) == 0) matcha_c_onnx = arg.substr(16);
+    else if (arg.rfind("--matcha-est-kmodel=", 0) == 0) matcha_est_kmodel = arg.substr(20);
+    else if (arg.rfind("--probe-est=", 0) == 0) probe_est = arg.substr(12);
+    else if (arg.rfind("--melo-say=", 0) == 0) melo_say = arg.substr(11);
+    else if (arg.rfind("--melo-flow=", 0) == 0) melo_flow = arg.substr(12);
+    else if (arg.rfind("--melo-midcpu=", 0) == 0) melo_midcpu = arg.substr(14);
+    else if (arg.rfind("--probe-chain=", 0) == 0) probe_chain = arg.substr(14);
+    else if (arg.rfind("--melo-pregen=", 0) == 0) melo_pregen = arg.substr(14);
+    else if (arg.rfind("--melo-subgen=", 0) == 0) melo_subgen = arg.substr(14);
+    else if (arg.rfind("--melo-lexicon=", 0) == 0) melo_lexicon = arg.substr(15);
+    else if (arg.rfind("--melo-tokens=", 0) == 0) melo_tokens = arg.substr(14);
     else if (arg.rfind("--matcha-lexicon=", 0) == 0) matcha_lexicon = arg.substr(17);
     else if (arg.rfind("--matcha-tokens=", 0) == 0) matcha_tokens = arg.substr(16);
+    else if (arg.rfind("--piper-say=", 0) == 0) piper_say = arg.substr(12);
+    else if (arg.rfind("--piper-dir=", 0) == 0) piper_dir = arg.substr(12);
+    else if (arg.rfind("--piper-tokens-file=", 0) == 0) piper_tokens_file = arg.substr(20);
     else if (arg.rfind("--output=", 0) == 0) out_wav = arg.substr(9);
   }
 
   printf("=== KPU VITS TTS Runner ===\n");
+
+  // ==== piper end-to-end: text -> espeak phonemize (sherpa C++) -> enc KPU
+  // ==== -> dp mid block (CPU ORT, dynamic) -> pad to F=128 -> flow 4 KPU
+  // ==== pieces (resident, dual-output chain) -> dec 20 KPU pieces (resident)
+  // ==== -> wav @22050. Eval build: eps noise loaded from fixed files.
+  if (!piper_say.empty() || (daemon_mode && !piper_dir.empty())) {
+    if (piper_dir.empty()) {
+      fprintf(stderr, "--piper-say/--daemon-piper needs --piper-dir=<dir>\n");
+      return 1;
+    }
+    const std::string PD = piper_dir.back() == '/' ? piper_dir : piper_dir + "/";
+    const int FT = 128;                 // flow/dec frame bucket
+    const int ENC_T = 79;               // enc token bucket (static kmodel)
+    k230_kpu_init();
+    using clk2 = std::chrono::steady_clock;
+    auto cpu_ms_p = []() {
+      struct rusage ru;
+      getrusage(RUSAGE_SELF, &ru);
+      return (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000.0 +
+             (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000.0;
+    };
+    double cp0 = cpu_ms_p();
+    auto t_all0 = clk2::now();
+
+    // --- frontend (skipped entirely on the tokens-file eval path: espeak
+    // init is the prime heap-corruption suspect on riscv) ---
+    sherpa_onnx::OfflineTtsVitsModelMetaData meta;
+    meta.is_piper = true;
+    meta.sample_rate = 22050;
+    std::unique_ptr<sherpa_onnx::PiperPhonemizeLexicon> lexicon;
+    if (piper_tokens_file.empty())
+      lexicon = std::make_unique<sherpa_onnx::PiperPhonemizeLexicon>(
+          PD + "tokens.txt", PD + "espeak-ng-data", meta);
+    fprintf(stderr, "[piper] lexicon ready\n");
+
+    // --- resident models: ALL of them (enc + flow4 + dec20), loaded once in
+    // a pure-alloc phase like the resdec probe. Interleaved scoped load/free
+    // (enc/flow scoped per sentence) corrupted MMZ segment reuse -> segfault
+    // at the first dec gnne_enable. espeak (heap corruptor suspect) stays
+    // skipped on the tokens-file path.
+    KpuModel enc(PD + "piper_enc" +
+                     std::string(getenv("PIPER_ENC_SFX") ? getenv("PIPER_ENC_SFX") : "") +
+                     ".kmodel",
+                 "pEnc");
+    const char *fsfxe = getenv("PIPER_FLOW_SFX");
+    std::string fsfx = fsfxe ? fsfxe : "";
+    std::vector<std::unique_ptr<KpuModel>> flow;
+    for (int j = 0; j < 4; ++j)
+      flow.push_back(std::make_unique<KpuModel>(
+          PD + "piper_flow_s" + std::to_string(j) + fsfx + ".kmodel", "pFlow"));
+    static const int CT_IDXS[] = {1, 7, 13};
+    auto is_ct = [&](int i) {
+      for (int c : CT_IDXS)
+        if (c == i) return true;
+      return false;
+    };
+    std::vector<std::unique_ptr<KpuModel>> dec;
+    bool nodec = getenv("PIPER_NODEC") != nullptr;  // bisect: skip dec load
+    if (!nodec) {
+      // PIPER_DEC_SFX: load e.g. p0_i8.kmodel for int8-quantized A/B tests
+      const char *sfxe = getenv("PIPER_DEC_SFX");
+      std::string sfx = sfxe ? sfxe : "";
+      static const char *DEC_NAMES[] = {
+          "p0", "ct0", "p1", "p2", "p3", "p4", "p5", "ct1", "p6", "p7", "p8",
+          "p9", "p10", "ct2", "p11", "p12", "p13", "p14", "p15", "p16"};
+      for (const char *n : DEC_NAMES)
+        dec.push_back(
+            std::make_unique<KpuModel>(PD + n + sfx + ".kmodel", "pDec"));
+    }
+    fprintf(stderr, "[piper] models resident: enc+flow4%s\n",
+            nodec ? " (dec skipped)" : "+dec20");
+    double cp1 = cpu_ms_p();
+    auto t_ld1 = clk2::now();
+
+    // mid dp block on CPU ORT (dynamic frame count)
+    bool noort = getenv("PIPER_NOORT") != nullptr;  // bisect: skip ORT session
+    Ort::Env penv(ORT_LOGGING_LEVEL_ERROR, "piper-pipe");
+    Ort::SessionOptions pso;
+    pso.SetIntraOpNumThreads(1);
+    // ORT 1.14 graph optimization mis-handles the internal RandomNormalLike
+    // ops (downstream Mul sees "Missing Input") — run the raw graph.
+    pso.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
+    std::unique_ptr<Ort::Session> midp;
+    if (!noort || getenv("PIPER_SKIP") == nullptr)
+      midp = std::make_unique<Ort::Session>(
+          penv, (PD + "piper_mid_a.onnx").c_str(), pso);
+    Ort::Session *mid = midp.get();
+    Ort::MemoryInfo pmem = Ort::MemoryInfo::CreateCpu(
+        OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault);
+
+    // PIPER_DP_KPU=1: dp conv backbone on 4 float KPU kmodels (post/f7/f5/f3),
+    // the TransformerCoupling attention gymnastics stay on 3 small ORT graphs.
+    // Execution per sentence (interleaved):
+    //   post(o2,o1) -> f7(x0=zf[0],post,o1) -> att7(h29,zf,o1) -> c7
+    //   f5(x0=(c7*mask)[1],post,o1) -> att5(h29,c7,o1) -> c5
+    //   f3(x0=c5[1],post,o1)        -> att3(h29,c5,o1) -> dur
+    bool dpkpu = getenv("PIPER_DP_KPU") != nullptr;
+    std::unique_ptr<KpuModel> dp_post_m, dp_f7_m, dp_f5_m, dp_f3_m;
+    std::unique_ptr<Ort::Session> att7s, att5s, att3s;
+    if (dpkpu) {
+      dp_post_m = std::make_unique<KpuModel>(PD + "piper_dp_post.kmodel", "dpP");
+      dp_f7_m = std::make_unique<KpuModel>(PD + "piper_dp_f7.kmodel", "dp7");
+      dp_f5_m = std::make_unique<KpuModel>(PD + "piper_dp_f5.kmodel", "dp5");
+      dp_f3_m = std::make_unique<KpuModel>(PD + "piper_dp_f3.kmodel", "dp3");
+      att7s = std::make_unique<Ort::Session>(penv, (PD + "piper_dp_att7.onnx").c_str(), pso);
+      att5s = std::make_unique<Ort::Session>(penv, (PD + "piper_dp_att5.onnx").c_str(), pso);
+      att3s = std::make_unique<Ort::Session>(penv, (PD + "piper_dp_att3.onnx").c_str(), pso);
+    }
+    std::vector<float> dp_post(192 * 79), dp_h29(29 * 79), dp_c7(2 * 79),
+        dp_c5(2 * 79), dp_dur(79), dp_zf(2 * 79), dp_x0(79), dp_masked(2 * 79);
+    std::vector<Ort::Value> dp_fin;
+    auto dp_run1 = [&](Ort::Session &ses, float *const *ins,
+                       const int64_t *shps, const size_t *lens, size_t nin,
+                       float *out) {
+      auto t_dp0 = clk2::now();
+      dp_fin.clear();
+      for (size_t i = 0; i < nin; ++i)
+        dp_fin.push_back(Ort::Value::CreateTensor<float>(
+            pmem, ins[i], lens[i], shps + i * 3, 3));
+      Ort::AllocatorWithDefaultOptions al;
+      std::vector<Ort::AllocatedStringPtr> keep;
+      std::vector<const char *> inames, onames;
+      for (size_t i = 0; i < ses.GetInputCount(); ++i) {
+        keep.push_back(ses.GetInputNameAllocated(i, al));
+        inames.push_back(keep.back().get());
+      }
+      for (size_t i = 0; i < ses.GetOutputCount(); ++i) {
+        keep.push_back(ses.GetOutputNameAllocated(i, al));
+        onames.push_back(keep.back().get());
+      }
+      auto ov = ses.Run(Ort::RunOptions{nullptr}, inames.data(), dp_fin.data(),
+                        nin, onames.data(), 1);
+      memcpy(out, ov[0].GetTensorMutableData<float>(),
+             ov[0].GetTensorTypeAndShapeInfo().GetElementCount() * 4);
+      if (getenv("PIPER_DP_DBG"))
+        fprintf(stderr, "[dp] att run %.1f ms\n",
+                std::chrono::duration<double, std::milli>(clk2::now() - t_dp0)
+                    .count());
+    };
+
+    std::vector<float> zp128(192 * FT, 0.f), mask128(FT, 0.f);
+    std::vector<float> dec_in(192 * FT), hT(192 * FT), hT2(192 * FT);
+    std::vector<float> tmp(4 * 1024 * 1024);
+    std::vector<float> sk0(128 * 1024), sk1(64 * 8192), sk2(32 * 32768);
+    std::vector<int64_t> ids79(ENC_T, 0);
+
+    // mid dp block v2: noise is INTERNAL (RandomNormalLike) — inputs are
+    // BND(5) + scales only; z noise is sampled at the expanded rate inside.
+    std::vector<float> scales{0.667f, 1.0f, 0.8f};
+    auto sks_pick = [](std::vector<float> &a, std::vector<float> &b,
+                       std::vector<float> &c, int i) -> std::vector<float> & {
+      return i <= 0 ? a : (i == 1 ? b : c);
+    };
+
+    // ==== per-utterance loop: --daemon reads <wav>\t<sid>\t<speed>\t<text>
+    // lines with models resident; single-shot runs exactly once. The RNGs
+    // are re-created per utterance == old per-process determinism.
+    if (daemon_mode) { printf("READY\n"); fflush(stdout); }
+    int piper_utt = 0;
+    std::string say = piper_say;
+    std::mt19937 rngdp(12345);
+    std::mt19937 rngmid(12345);
+    for (;;) {
+      if (daemon_mode) {
+        std::string dline;
+        if (!std::getline(std::cin, dline)) break;
+        if (dline == "QUIT") break;
+        if (dline.empty() || dline[0] == '#') continue;
+        const size_t q1 = dline.find('\t');
+        const size_t q2 =
+            (q1 == std::string::npos) ? std::string::npos : dline.find('\t', q1 + 1);
+        const size_t q3 =
+            (q2 == std::string::npos) ? std::string::npos : dline.find('\t', q2 + 1);
+        if (q3 == std::string::npos) {
+          printf("ERROR protocol: expected <wav>\t<sid>\t<speed>\t<text>\n");
+          fflush(stdout);
+          continue;
+        }
+        const std::string wav_req = dline.substr(0, q1);
+        const std::string spd_req = dline.substr(q2 + 1, q3 - q2 - 1);
+        say = dline.substr(q3 + 1);
+        if (!wav_req.empty()) out_wav = wav_req;
+        try {
+          float spd = std::stof(spd_req);
+          scales[1] = (spd > 0) ? (1.0f / spd) : 1.0f;
+        } catch (...) { scales[1] = 1.0f; }
+        cp0 = cpu_ms_p();
+        t_all0 = clk2::now();
+      } else if (piper_utt > 0) {
+        break;
+      }
+      ++piper_utt;
+    std::vector<std::vector<int64_t>> sents;
+    auto t_fe0 = clk2::now();
+    if (!piper_tokens_file.empty()) {
+      // raw int64 ids dumped by the x86 prep (single sentence, eval path)
+      FILE *fi = fopen(piper_tokens_file.c_str(), "rb");
+      if (!fi) { perror("tokens file"); return 1; }
+      std::vector<int64_t> ids;
+      int64_t v64;
+      while (fread(&v64, 8, 1, fi) == 1) ids.push_back(v64);
+      fclose(fi);
+      sents.push_back(std::move(ids));
+    } else {
+      // Pre-split at punctuation (keeping it inside each chunk so espeak
+      // emits the pause phone): sherpa only splits at 。！？, and any chunk
+      // longer than the 79-token enc bucket would be silently truncated.
+      auto utf8_len = [](unsigned char c) {
+        if (c < 0x80) return 1;
+        if ((c >> 5) == 0x6) return 2;
+        if ((c >> 4) == 0xE) return 3;
+        return 4;
+      };
+      static const char *PUNCT3[] = {"，", "。", "！", "？", "；", "、", "："};
+      std::vector<std::string> pieces;
+      std::string cur;
+      for (size_t i = 0; i < say.size();) {
+        int cl = utf8_len((unsigned char)say[i]);
+        cur.append(say, i, cl);
+        bool punct = cl == 1 && (say[i] == ',' || say[i] == '.' ||
+                                 say[i] == '!' || say[i] == '?' ||
+                                 say[i] == ';' || say[i] == ':');
+        if (cl == 3)
+          for (const char *p : PUNCT3)
+            if (say.compare(i, 3, p) == 0) punct = true;
+        i += cl;
+        if (punct && !cur.empty()) {
+          pieces.push_back(cur);
+          cur.clear();
+        }
+      }
+      if (!cur.empty()) pieces.push_back(cur);
+      for (auto &pc : pieces) {
+        auto toks = lexicon->ConvertTextToTokenIds(pc, "cmn");
+        for (auto &t : toks) sents.emplace_back(t.tokens);
+      }
+      // --- 音素级切块：enc/dec 是静态 shape 桶（79 音素 / 128 帧=32768 采样），
+      // 超长输入会被静默截断（"吃词"）。社区 piper 无此限制（动态 shape），
+      // 这里按 ≤38 音素/块 切分后逐块走管线、音频自然拼接——调用方只管给句子
+      {
+        const size_t MAXT = 38;
+        std::vector<std::vector<int64_t>> chunked;
+        for (auto &t : sents) {
+          if (t.size() <= MAXT) { chunked.push_back(t); continue; }
+          for (size_t off = 0; off < t.size(); off += MAXT) {
+            size_t end = std::min(off + MAXT, t.size());
+            chunked.emplace_back(t.begin() + off, t.begin() + end);
+          }
+        }
+        if (chunked.size() != sents.size()) {
+          fprintf(stderr, "[piper] chunked %zu pieces -> %zu (MAXT=%zu)\n",
+                  sents.size(), chunked.size(), MAXT);
+          sents = std::move(chunked);
+        }
+      }
+      if (getenv("PIPER_DUMP_IDS")) {
+        for (size_t si = 0; si < sents.size(); ++si) {
+          printf("[piper] sent %zu tokens(%zu):", si, sents[si].size());
+          for (auto v : sents[si]) printf(" %lld", (long long)v);
+          printf("\n");
+        }
+        FILE *fi2 = fopen((PD + "board_ids.f32").c_str(), "wb");
+        if (fi2) {
+          fwrite(sents[0].data(), 8, sents[0].size(), fi2);
+          fclose(fi2);
+        }
+      }
+    }
+    auto t_fe1 = clk2::now();
+    double t_front =
+        std::chrono::duration<double, std::milli>(t_fe1 - t_fe0).count();
+    printf("[piper] sentences: %zu, phonemize %.0f ms\n", sents.size(), t_front);
+    if (sents.empty()) {
+      if (daemon_mode) { printf("ERROR no sentences\n"); fflush(stdout); continue; }
+      fprintf(stderr, "no sentences\n");
+      return 1;
+    }
+    std::vector<float> audio_all;
+    auto t_all1 = clk2::now();
+    double t_synth = 0;
+    for (auto &ids : sents) {
+      // 1. enc (pad ids to ENC_T; input_lengths = padded count — the mid
+      // block must see ONE consistent length; pad tail gets masked/capped)
+      std::fill(ids79.begin(), ids79.end(), (int64_t)0);
+      int64_t nreal = (int64_t)std::min(ids.size(), (size_t)ENC_T);
+      for (int64_t i = 0; i < nreal; ++i) ids79[i] = ids[i];
+      int64_t lens = nreal;  // real count: pad tokens must be MASKED (y_mask=0)
+      // enc v3: outputs [H(1,384,79), Cast_1(x_mask), Mul_2, Unsqueeze].
+      // The nncase Split op zeroes its second output, so we keep the
+      // PRE-SPLIT H and slice m/logs on the host (channel-major contiguous:
+      // m = h[0:15168], logs = h[15168:30336]).
+      std::vector<float> o0(30336 + 16), o1(30336 + 16), o2(30336 + 16),
+          o3(30336 + 16);
+      // diagnostic bisect flags (eval build):
+      // PIPER_SKIP=e  — skip enc+mid, read padded zp128/mask128 from PD files
+      // PIPER_SKIP=m  — run enc, skip mid (z from files)
+      // PIPER_FLOW_FRESH — after the resident chain, reload the 4 flow pieces
+      //                    fresh and rerun (dump fsfresh.f32)
+      const char *skipenv = getenv("PIPER_SKIP");
+      std::string skips = skipenv ? skipenv : "";
+      bool skip_all = skips.find('e') != std::string::npos;
+      bool skip_mid = skips.find('m') != std::string::npos;
+      bool fresh_flow = getenv("PIPER_FLOW_FRESH") != nullptr;
+      const float *zp = nullptr;
+      const float *mk = nullptr;
+      int64_t Ly = 0;
+      std::vector<float> zf, mf;
+      std::vector<Ort::Value> mo;
+      clk2::time_point ta = clk2::now(), tb = ta;
+      double ca0 = cpu_ms_p(), ca1 = ca0, cb0 = ca0, cb1 = ca0,
+             cc0 = ca0, cc1 = ca0, cd0 = ca0, cd1 = ca0;
+      if (!skip_all) {
+      ta = clk2::now();
+      ca0 = cpu_ms_p();
+      enc.Run({ids79.data(), &lens}, {o0.data(), o1.data(), o2.data(),
+                                      o3.data()});
+      fprintf(stderr, "[piper] enc done\n");
+      // eval: dump enc outputs to identify nncase's output ordering
+      if (getenv("PIPER_DUMP_ENC")) {
+        enc.Run({ids79.data(), &lens}, {o0.data(), o1.data(), o2.data(),
+                                        o3.data()});
+        const char *on[] = {"o0", "o1", "o2", "o3", "o4"};
+        std::vector<float> *ov[] = {&o0, &o1, &o2, &o3};
+        for (int q = 0; q < 4; ++q) {
+          FILE *fq = fopen((PD + "enc_" + on[q] + ".f32").c_str(), "wb");
+          if (fq) {
+            fwrite(ov[q]->data(), 4, ov[q]->size(), fq);
+            fclose(fq);
+          }
+        }
+        fprintf(stderr, "[piper] enc dumped\n");
+      }
+      tb = clk2::now();
+      ca1 = cpu_ms_p();
+      cb0 = cpu_ms_p();
+      }
+
+      // 2. mid on CPU, split in two (x86 split: dp=3.5ms, expansion=24ms of
+      // dynamic-shape gymnastics -> move expansion to plain C loops here):
+      //   mid_a.onnx: BND(5)+scales+dp_noise[1,2,79] -> masked durations [1,1,79]
+      //   host C++:   dur_t = ceil(d * scales[1]); frame->token repeat;
+      //               z_p[c][f] = m[c][t] + scales[0]*z*exp(logs[c][t])
+      // (verified bit-exact vs the original whole-mid onnx on x86)
+      // PIPER_DP_KPU=1 takes the interleaved KPU/ORT path instead (see the
+      // loader above); it produces the same durations [1,1,79].
+      if (dpkpu && !skip_all && !skip_mid) {
+        std::normal_distribution<float> ndp(0.f, 1.f);
+        // dp noise: drawn c-major (same stream/order as the mid_a path's
+        // dpnoise); zf = channel-flipped 0.8*noise — the graph does Mul
+        // scales[2] then a channel-reversing Slice (verified: dpfit
+        // flows.8/Slice == flip(0.8*noise) bit-exact), so flows.7's
+        // x0 = zf[0] = 0.8*noise ch1.
+        for (int i = 0; i < 2 * 79; ++i) dp_masked[i] = 0.8f * ndp(rngdp);
+        for (int c = 0; c < 2; ++c)
+          for (int t = 0; t < 79; ++t)
+            dp_zf[c * 79 + t] = dp_masked[(1 - c) * 79 + t];
+        int64_t sh_att[9] = {1, 29, 79, 1, 2, 79, 1, 1, 79};
+        size_t ln_att[3] = {29 * 79, 2 * 79, 79};
+        auto dpdump = [&](const char *nm, const float *p, size_t n) {
+          FILE *f = fopen((PD + nm).c_str(), "wb");
+          if (f) { fwrite(p, 4, n, f); fclose(f); }
+        };
+        const bool dpdump_on = getenv("PIPER_DUMP_DP") != nullptr;
+        // postnet: (hidden o2, x_mask o1) -> post_out
+        dp_post_m->Run({o2.data(), o1.data()}, {dp_post.data()});
+        if (dpdump_on) dpdump("dppost.f32", dp_post.data(), 15168);
+        // f7 conv: (x0=zf[0], g=post_out, mask) -> h29
+        memcpy(dp_x0.data(), dp_zf.data(), 79 * 4);
+        dp_f7_m->Run({dp_x0.data(), dp_post.data(), o1.data()},
+                     {dp_h29.data()});
+        if (dpdump_on) {
+          dpdump("dpzf.f32", dp_zf.data(), 158);
+          dpdump("dph29_7.f32", dp_h29.data(), 29 * 79);
+        }
+        {
+          float *ins[3] = {dp_h29.data(), dp_zf.data(), o1.data()};
+          dp_run1(*att7s, ins, sh_att, ln_att, 3, dp_c7.data());
+          if (dpdump_on) dpdump("dpc7.f32", dp_c7.data(), 2 * 79);
+        }
+        // x0_5 = (c7 * x_mask) flipped channel-wise, take ch0
+        for (int c = 0; c < 2; ++c)
+          for (int t = 0; t < 79; ++t)
+            dp_masked[(1 - c) * 79 + t] = dp_c7[c * 79 + t] * o1[t];
+        {
+          // f5 kmodel inputs (piper_dp_split.py PIECES order):
+          // [flows.5/Split (x0_5), flows.7/Concat_20 (c7), x_mask, Mul_2]
+          float *ins[4] = {dp_masked.data(), dp_c7.data(), o1.data(),
+                           o2.data()};
+          dp_f5_m->Run({ins[0], ins[1], ins[2], ins[3]}, {dp_h29.data()});
+          if (dpdump_on) dpdump("dph29_5.f32", dp_h29.data(), 29 * 79);
+        }
+        {
+          float *ins[3] = {dp_h29.data(), dp_c7.data(), o1.data()};
+          int64_t sh[9] = {1, 29, 79, 1, 2, 79, 1, 1, 79};
+          size_t ln[3] = {29 * 79, 2 * 79, 79};
+          dp_run1(*att5s, ins, sh, ln, 3, dp_c5.data());
+          if (dpdump_on) dpdump("dpc5.f32", dp_c5.data(), 2 * 79);
+        }
+        // x0_3 = flip(c5)[0] = c5[1] (verified numerically, no mask here)
+        {
+          // f3 inputs: [flows.3/Split (x0_3), flows.5/Concat_20 (c5),
+          // x_mask, Mul_2]
+          memcpy(dp_x0.data(), dp_c5.data() + 79, 79 * 4);
+          float *ins[4] = {dp_x0.data(), dp_c5.data(), o1.data(), o2.data()};
+          dp_f3_m->Run({ins[0], ins[1], ins[2], ins[3]}, {dp_h29.data()});
+          if (dpdump_on) dpdump("dph29_3.f32", dp_h29.data(), 29 * 79);
+        }
+        {
+          float *ins[3] = {dp_h29.data(), dp_c5.data(), o1.data()};
+          int64_t sh[9] = {1, 29, 79, 1, 2, 79, 1, 1, 79};
+          size_t ln[3] = {29 * 79, 2 * 79, 79};
+          dp_run1(*att3s, ins, sh, ln, 3, dp_dur.data());
+        }
+        const float *dur = dp_dur.data();
+        // int8 dp pieces bias the duration logits ~+17% (Ly 64->75 on the
+        // 6-syllable test); PIPER_LEN re-centers total length (multiplier).
+        float lenfac = scales[1];
+        if (const char *le = getenv("PIPER_LEN")) lenfac = (float)atof(le);
+        std::fill(zp128.begin(), zp128.end(), 0.f);
+        std::fill(mask128.begin(), mask128.end(), 0.f);
+        Ly = 0;
+        for (int t = 0; t < 79; ++t) {
+          int d = (int)std::ceil(dur[t] * lenfac - 1e-6f);
+          if (d <= 0) continue;
+          const float *mt = o0.data() + (size_t)t;
+          const float *lt = o0.data() + 15168 + (size_t)t;
+          for (int j = 0; j < d && Ly < FT; ++j, ++Ly) {
+            float zn = ndp(rngdp);
+            mask128[Ly] = 1.f;
+            for (int c = 0; c < 192; ++c)
+              zp128[(size_t)c * FT + Ly] =
+                  mt[(size_t)c * 79] + scales[0] * zn * expf(lt[(size_t)c * 79]);
+          }
+          if (Ly >= FT) break;
+        }
+        zp = zp128.data();
+        mk = mask128.data();
+        if (getenv("PIPER_DUMP_MID")) {
+          FILE *fd = fopen((PD + "mid_dur_dp.f32").c_str(), "wb");
+          if (fd) { fwrite(dur, 4, 79, fd); fclose(fd); }
+        }
+        fprintf(stderr, "[piper] mid done Ly=%lld (dp-kpu)\n", (long long)Ly);
+        auto tb2 = clk2::now();
+        (void)tb2;
+      } else if (!skip_all && !skip_mid) {
+      std::vector<Ort::Value> fin;
+      std::vector<std::vector<int64_t>> fsh;
+      auto push_in = [&](const float *p, std::vector<int64_t> sh) {
+        fsh.push_back(sh);
+        fin.push_back(Ort::Value::CreateTensor<float>(
+            pmem, const_cast<float *>(p), (size_t)std::accumulate(
+                     sh.begin(), sh.end(), 1, std::multiplies<int64_t>()),
+            sh.data(), sh.size()));
+      };
+      // dp noise: [1,2,79] standard normal (host RNG replaces the graph's
+      // RandomNormalLike, which is hoisted to an input in mid_a)
+      std::normal_distribution<float> ndist(0.f, 1.f);
+      std::vector<float> dpnoise(2 * 79);
+      for (auto &v : dpnoise) v = ndist(rngmid);
+      push_in(o1.data(), {1, 1, 79});           // x_mask (Cast_1)
+      push_in(o0.data(), {1, 192, 79});         // m = H channels 0..191
+      push_in(o0.data() + 15168, {1, 192, 79}); // logs = H channels 192..383
+      push_in(o2.data(), {1, 192, 79});         // encoder attn hidden
+      push_in(o3.data(), {1, 1, 1, 79});        // attn mask (Unsqueeze)
+      push_in(scales.data(), {3});
+      push_in(dpnoise.data(), {1, 2, 79});
+      std::vector<const char *> in_names;
+      Ort::AllocatorWithDefaultOptions palloc;
+      for (size_t i = 0; i < mid->GetInputCount(); ++i)
+        in_names.push_back(mid->GetInputNameAllocated(i, palloc).release());
+      std::vector<const char *> out_names;
+      for (size_t i = 0; i < mid->GetOutputCount(); ++i)
+        out_names.push_back(mid->GetOutputNameAllocated(i, palloc).release());
+      auto mo2 = mid->Run(Ort::RunOptions{nullptr}, in_names.data(), fin.data(),
+                        fin.size(), out_names.data(), out_names.size());
+      mo = std::move(mo2);
+      const float *dur = mo[0].GetTensorMutableData<float>();
+      // host expansion -> fill the F=128 bucket directly (zp128/mask128)
+      std::fill(zp128.begin(), zp128.end(), 0.f);
+      std::fill(mask128.begin(), mask128.end(), 0.f);
+      Ly = 0;
+      for (int t = 0; t < 79; ++t) {
+        int d = (int)std::ceil(dur[t] * scales[1] - 1e-6f);
+        if (d <= 0) continue;
+        const float *mt = o0.data() + (size_t)t;          // m[:, t] stride 79
+        const float *lt = o0.data() + 15168 + (size_t)t;  // logs[:, t] stride 79
+        for (int j = 0; j < d && Ly < FT; ++j, ++Ly) {
+          float zn = ndist(rngmid);
+          mask128[Ly] = 1.f;
+          for (int c = 0; c < 192; ++c)
+            zp128[(size_t)c * FT + Ly] =
+                mt[(size_t)c * 79] + scales[0] * zn * expf(lt[(size_t)c * 79]);
+        }
+        if (Ly >= FT) break;
+      }
+      zp = zp128.data();
+      mk = mask128.data();
+      fprintf(stderr, "[piper] mid done Ly=%lld (host expansion)\n",
+              (long long)Ly);
+      if (getenv("PIPER_DUMP_MID")) {
+        // dump in the pre-padding [1,192,Ly] layout for the x86 compare tools
+        FILE *fz = fopen((PD + "mid_zp.f32").c_str(), "wb");
+        if (fz) {
+          std::vector<float> t(192 * (size_t)Ly);
+          for (int c = 0; c < 192; ++c)
+            memcpy(t.data() + (size_t)c * Ly, zp128.data() + (size_t)c * FT,
+                   (size_t)Ly * 4);
+          fwrite(t.data(), 4, t.size(), fz);
+          fclose(fz);
+        }
+        FILE *fm = fopen((PD + "mid_mask.f32").c_str(), "wb");
+        if (fm) { fwrite(mask128.data(), 4, (size_t)Ly, fm); fclose(fm); }
+        const char *bn[] = {"bnd0", "bnd1", "bnd2", "bnd3", "bnd4"};
+        const float *bv[] = {o1.data(), o0.data(), o0.data() + 15168,
+                             o2.data(), o3.data()};
+        for (int q = 0; q < 5; ++q) {
+          FILE *fb = fopen((PD + bn[q] + ".f32").c_str(), "wb");
+          fwrite(bv[q], 4, (q == 0 || q == 4) ? 79 : 15168, fb);
+          fclose(fb);
+        }
+        FILE *fd = fopen((PD + "mid_dur.f32").c_str(), "wb");
+        if (fd) { fwrite(dur, 4, 79, fd); fclose(fd); }
+      }
+      } else {
+        // SKIP mode: read the already-padded tensors dumped earlier
+        zf = ReadBinary<float>(PD + "zp128.f32");
+        mf = ReadBinary<float>(PD + "mask128.f32");
+        if (zf.size() != 192 * FT || mf.size() != FT) {
+          fprintf(stderr, "[piper] SKIP files bad: z=%zu m=%zu\n", zf.size(),
+                  mf.size());
+          return 1;
+        }
+        zp = zf.data();
+        mk = mf.data();
+        for (int i = 0; i < FT; ++i)
+          if (mk[i] > 0.5f) Ly++;
+        fprintf(stderr, "[piper] SKIP mode: Ly=%lld from files\n",
+                (long long)Ly);
+      }
+      auto tc = clk2::now();
+      cb1 = cpu_ms_p();
+      cc0 = cpu_ms_p();
+
+      // 3. SKIP path only: files are already padded to the bucket. The live
+      // mid path wrote zp128/mask128 directly in the host expansion above
+      // (per-channel layout, tail zeroed, mask=0 keeps the tail silent).
+      if (skip_all || skip_mid) {
+        memcpy(zp128.data(), zp, (size_t)(192 * FT) * 4);
+        memcpy(mask128.data(), mk, (size_t)FT * 4);
+      }
+
+      // 4. flow chain: single-output pieces on PRE-SPLIT boundaries (the
+      // nncase Split second output is broken on K230 — see handover)
+      // PIPER_DUMP_FLOW2: run the chain twice with per-stage dumps
+      // (fs<p>_<pass>.f32) to isolate resident-context / warm-up anomalies.
+      {
+        int npass = getenv("PIPER_DUMP_FLOW2") ? 2 : 1;
+        if (getenv("PIPER_DUMP_FLOW2")) {
+          // record exactly what the flow chain receives
+          FILE *fz = fopen((PD + "zin.f32").c_str(), "wb");
+          if (fz) { fwrite(zp128.data(), 4, 192 * FT, fz); fclose(fz); }
+          FILE *fm2 = fopen((PD + "min.f32").c_str(), "wb");
+          if (fm2) { fwrite(mask128.data(), 4, FT, fm2); fclose(fm2); }
+        }
+        for (int pass = 1; pass <= npass; ++pass) {
+          flow[0]->Run({zp128.data(), mask128.data()}, {hT.data()});
+          flow[1]->Run({hT.data(), mask128.data()}, {hT2.data()});
+          flow[2]->Run({hT2.data(), mask128.data()}, {hT.data()});
+          flow[3]->Run({hT.data(), mask128.data()}, {dec_in.data()});
+          if (pass == npass) fprintf(stderr, "[piper] flow done (pass %d)\n", pass);
+          if (getenv("PIPER_DUMP_FLOW2")) {
+            const float *st[4] = {hT.data(), hT2.data(), hT.data(), dec_in.data()};
+            for (int q = 0; q < 4; ++q) {
+              FILE *fs = fopen((PD + "fs" + std::to_string(q) + "_" +
+                                std::to_string(pass) + ".f32")
+                                   .c_str(),
+                               "wb");
+              if (fs) { fwrite(st[q], 4, 192 * FT, fs); fclose(fs); }
+            }
+          }
+        }
+      }
+      fprintf(stderr, "[piper] flow done\n");
+      if (fresh_flow) {
+        // diagnostic: identical chain with FRESHLY loaded flow pieces
+        std::vector<std::unique_ptr<KpuModel>> fg;
+        for (int j = 0; j < 4; ++j)
+          fg.push_back(std::make_unique<KpuModel>(
+              PD + "piper_flow_s" + std::to_string(j) + ".kmodel", "fFlow"));
+        fg[0]->Run({zp128.data(), mask128.data()}, {hT.data()});
+        fg[1]->Run({hT.data(), mask128.data()}, {hT2.data()});
+        fg[2]->Run({hT2.data(), mask128.data()}, {hT.data()});
+        fg[3]->Run({hT.data(), mask128.data()}, {dec_in.data()});
+        FILE *fs = fopen((PD + "fsfresh.f32").c_str(), "wb");
+        if (fs) { fwrite(dec_in.data(), 4, 192 * FT, fs); fclose(fs); }
+        fprintf(stderr, "[piper] fresh-flow done\n");
+      }
+      if (getenv("PIPER_DUMP_MID")) {
+        FILE *fd = fopen((PD + "flow_decin.f32").c_str(), "wb");
+        fwrite(dec_in.data(), 4, 192 * FT, fd);
+        fclose(fd);
+      }
+      auto td = clk2::now();
+      cc1 = cpu_ms_p();
+      cd0 = cpu_ms_p();
+
+      // 5. dec resident chain (CT pieces emit the active skip). Both
+      // half-buffers must be oversized like the resdec probe (p0 alone
+      // writes 256ch×128 = 32768 floats; zp128 is only 192ch and would
+      // overflow).
+      int ct_done = 0;
+      static std::vector<float> half_a(4 * 1024 * 1024), half_b(4 * 1024 * 1024);
+      std::copy(dec_in.begin(), dec_in.end(), half_a.begin());
+      std::vector<float> *cur = &half_a;
+      std::vector<float> *nxt = &half_b;
+      for (size_t i = 0; i < dec.size(); ++i) {
+        KpuModel &k = *dec[i];
+        std::vector<float> &dst = is_ct((int)i) ? sks_pick(sk0, sk1, sk2, ct_done) : *nxt;
+        if (k.input_count() >= 2)
+          k.Run({cur->data(), sks_pick(sk0, sk1, sk2, ct_done - 1).data()},
+                {dst.data()});
+        else
+          k.Run({cur->data()}, {dst.data()});
+        if (is_ct((int)i))
+          ct_done++;
+        else
+          std::swap(cur, nxt);
+      }
+      auto te = clk2::now();
+      cd1 = cpu_ms_p();
+      // audio: cur now holds the last piece output [1,1,1,32768]
+      size_t nsamp = (size_t)Ly * 256;
+      if (nsamp > 32768) nsamp = 32768;
+      audio_all.insert(audio_all.end(), cur->data(), cur->data() + nsamp);
+      printf("[piper] sentence Ly=%lld: enc %.0f ms, mid %.0f ms, flow %.0f ms, "
+             "dec %.0f ms\n", (long long)Ly,
+             std::chrono::duration<double, std::milli>(tb - ta).count(),
+             std::chrono::duration<double, std::milli>(tc - tb).count(),
+             std::chrono::duration<double, std::milli>(td - tc).count(),
+             std::chrono::duration<double, std::milli>(te - td).count());
+      printf("[piper] CPU: enc %.0f ms, mid %.0f ms, flow %.0f ms, dec %.0f ms "
+             "(total %.0f)\n",
+             ca1 - ca0, cb1 - cb0, cc1 - cc0, cd1 - cd0, cd1 - ca0);
+      t_synth += std::chrono::duration<double, std::milli>(te - ta).count();
+    }
+    double cp2 = cpu_ms_p();
+    if (out_wav.empty()) out_wav = PD + "piper_out.wav";
+    sherpa_onnx::WriteWave(out_wav, 22050, audio_all.data(),
+                           (int32_t)audio_all.size());
+    double wall = std::chrono::duration<double>(t_all1 - t_all0).count();
+    double audio_s = audio_all.size() / 22050.0;
+    printf("[piper] WAV %s: %.2f s audio\n", out_wav.c_str(), audio_s);
+    printf("[piper] TIMING: synth %.0f ms (front %.0f, synth-total %.0f ms), "
+           "load %.0f ms CPU\n", t_synth, t_front, wall * 1000, cp1 - cp0);
+    printf("[piper] CPU: synth-chain %.0f ms of %.0f ms wall (%.0f%% single "
+           "core), total proc CPU %.0f ms\n", cp2 - cp1, wall * 1000,
+           100.0 * (cp2 - cp1) / (wall * 1000), cp2 - cp0);
+    printf("[piper] RTF (synth wall / audio) = %.3f\n", t_synth / 1000.0 / audio_s);
+    if (daemon_mode) {
+      printf("DONE %s %.2f %.3f\n", out_wav.c_str(), audio_s,
+             t_synth / 1000.0 / audio_s);
+      fflush(stdout);
+    }
+    }  // per-utterance for(;;)
+    mmz_shim_release_all();
+    _exit(0);
+  }
+
+  // ==== probe-chain: run the whole subgen KPU chain from fixed inputs
+  // ==== <dir>/z.f32 [192*256], <dir>/m.f32 [256] -> <dir>/chain.f32.
+  // ==== Deterministic (no pregen randomness); compare chain.f32 against the
+  // ==== x86 ONNX subgen reference on the PC (cos >= 0.98 gate) BEFORE audio.
+  if (!probe_chain.empty()) {
+    if (melo_subgen.empty()) {
+      fprintf(stderr, "--probe-chain needs --melo-subgen=<comma-separated kmodels>\n");
+      return 1;
+    }
+    std::vector<std::string> sub_parts;
+    {
+      auto groups0 = ParseSubgenGroups(melo_subgen);
+      for (auto &g : groups0)
+        sub_parts.insert(sub_parts.end(), g.begin(), g.end());
+    }
+    k230_kpu_init();
+    for (size_t p = 0; p < sub_parts.size(); ++p)
+      printf("[probe-chain] piece %zu: %s\n", p, sub_parts[p].c_str());
+    auto z = ReadBinary<float>(probe_chain + "/z.f32");
+    auto m = ReadBinary<float>(probe_chain + "/m.f32");
+    if (z.size() != 192 * 256 || m.size() != 256) {
+      fprintf(stderr, "probe-chain size mismatch: z=%zu m=%zu\n", z.size(), m.size());
+      return 1;
+    }
+    int64_t sid0 = 0;
+    using clk = std::chrono::steady_clock;
+    auto cpu_ms = []() {
+      struct rusage ru;
+      getrusage(RUSAGE_SELF, &ru);
+      return (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000.0 +
+             (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000.0;
+    };
+    // MELO_IN: single-kmodel execution test — read in0 from an arbitrary f32
+    // file (any shape; bytes must match the kmodel input), run, write chain.f32
+    // (the 2-input (cur,sid) layout used by all dq pieces).
+    std::vector<float> ext_in;
+    if (getenv("MELO_IN") && !getenv("MELO_RESDEC")) {
+      ext_in = ReadBinary<float>(getenv("MELO_IN"));
+      if (ext_in.empty()) {
+        fprintf(stderr, "MELO_IN empty/unreadable\n");
+        return 1;
+      }
+      std::vector<float> ext_in2;
+      if (getenv("MELO_IN2")) ext_in2 = ReadBinary<float>(getenv("MELO_IN2"));
+      std::vector<float> ext_in3;
+      if (getenv("MELO_IN3")) ext_in3 = ReadBinary<float>(getenv("MELO_IN3"));
+      auto t0x = clk::now();
+      double cx0 = cpu_ms();
+      std::vector<float> yx;
+      {
+        KpuModel kx(sub_parts[0], "meloX");
+        yx.resize(kx.output_bytes(0) / sizeof(float));
+        if (kx.input_count() == 3 && !ext_in3.empty())
+          kx.Run({ext_in.data(), ext_in2.data(), ext_in3.data()}, {yx.data()});
+        else if (kx.input_count() >= 3 && !ext_in2.empty())
+          kx.Run({ext_in.data(), ext_in2.data(), &sid0}, {yx.data()});
+        else if (kx.input_count() == 2 && !ext_in2.empty())
+          kx.Run({ext_in.data(), ext_in2.data()}, {yx.data()});
+        else
+          kx.Run({ext_in.data(), &sid0}, {yx.data()});
+      }
+      double cx1 = cpu_ms();
+      auto t1x = clk::now();
+      FILE *fx = fopen((probe_chain + "/chain.f32").c_str(), "wb");
+      if (!fx) { perror("fopen"); return 1; }
+      fwrite(yx.data(), 4, yx.size(), fx);
+      fclose(fx);
+      printf("[probe-chain] MELO_IN run: out=%zu floats in %.0f ms\n", yx.size(),
+             std::chrono::duration<double, std::milli>(t1x - t0x).count());
+      printf("[probe-chain] CPU in run: %.0f ms\n", cx1 - cx0);
+      mmz_shim_release_all();
+      _exit(0);
+    }
+    // MELO_RESDEC: resident (cur,skip) chain for the piper dec piece list —
+    // all kmodels already loaded in ksub[], io buffers allocated once, no
+    // reload/alloc churn. Piece order must be p0,ct0,p1..p5,ct1,p6..p10,ct2,
+    // p11..p15,p16: CT pieces (indices 1,7,13) emit into the active skip
+    // buffer, everything else chains cur->cur; 2-input pieces take
+    // (cur, active skip).
+    if (getenv("MELO_RESDEC")) {
+      static const int CT_IDXS[] = {1, 7, 13};
+      auto is_ct = [&](int i) {
+        for (int c : CT_IDXS)
+          if (c == i) return true;
+        return false;
+      };
+      std::vector<float> x0 = ReadBinary<float>(getenv("MELO_IN"));
+      if (x0.empty()) {
+        fprintf(stderr, "MELO_RESDEC: MELO_IN empty\n");
+        return 1;
+      }
+      std::vector<float> cur(4 * 1024 * 1024, 0.f), tmp(4 * 1024 * 1024, 0.f);
+      std::vector<float> sks[3];
+      sks[0].resize(128 * 1024);
+      sks[1].resize(64 * 8192);
+      sks[2].resize(32 * 32768);
+      memcpy(cur.data(), x0.data(), std::min(x0.size(), cur.size()) * sizeof(float));
+      int ct_done = 0;
+      double c0 = cpu_ms();
+      std::vector<std::unique_ptr<KpuModel>> rk;
+      for (const auto &p : sub_parts) rk.push_back(std::make_unique<KpuModel>(p, "resdec"));
+      double c1 = cpu_ms();
+      auto t0r = clk::now();
+      for (size_t i = 0; i < rk.size(); ++i) {
+        KpuModel &k = *rk[i];
+        std::vector<float> &dst = is_ct((int)i) ? sks[ct_done] : tmp;
+        auto ta = clk::now();
+        if (k.input_count() >= 2)
+          k.Run({cur.data(), sks[ct_done - 1].data()}, {dst.data()});
+        else
+          k.Run({cur.data()}, {dst.data()});
+        auto tb = clk::now();
+        printf("[resdec] piece %zu: %.0f ms\n", i,
+               std::chrono::duration<double, std::milli>(tb - ta).count());
+        if (is_ct((int)i))
+          ct_done++;
+        else
+          cur.swap(tmp);
+      }
+      auto t1r = clk::now();
+      double c2 = cpu_ms();
+      printf("[resdec] TOTAL: %.0f ms\n",
+             std::chrono::duration<double, std::milli>(t1r - t0r).count());
+      printf("[resdec] CPU: load %.0f ms, chain %.0f ms\n", c1 - c0, c2 - c1);
+      FILE *fx = fopen((probe_chain + "/resdec_out.f32").c_str(), "wb");
+      if (fx) {
+        fwrite(cur.data(), 4, 32768, fx);
+        fclose(fx);
+      }
+      mmz_shim_release_all();
+      _exit(0);
+    }
+    // MELO_NPIECES: bisect aid — run only the first N pieces of the chain and
+    // dump every piece output to <dir>/pc<k>.f32 for piece-wise cos vs ORT.
+    // k=0: flow_a out, k=1: flow_b out, k>=2: dq(p-2) out.
+    int npieces = (int)sub_parts.size();
+    if (getenv("MELO_NPIECES")) npieces = atoi(getenv("MELO_NPIECES"));
+    auto dump_piece = [&](int k, const std::vector<float> &v) {      if (k >= npieces) return;
+      std::string pf = probe_chain + "/pc" + std::to_string(k) + ".f32";
+      FILE *pf2 = fopen(pf.c_str(), "wb");
+      if (pf2) { fwrite(v.data(), 4, v.size(), pf2); fclose(pf2); }
+    };
+    auto t0 = clk::now();
+    std::vector<float> y;
+    auto groups = ParseSubgenGroups(melo_subgen);
+    if (sub_parts.size() == 1) {
+      y = KpuRunScopedFlow(sub_parts[0], "meloP", z, m, sid0);
+    } else if (sub_parts.size() == 7 || groups.size() == 2) {
+      // (cur,sid) chains: dq pieces, optionally split by '|' with a CPU
+      // splice (--melo-midcpu); first cur comes from <dir>/in0.f32 (z_hat)
+      std::vector<float> in0 = ReadBinary<float>(probe_chain + "/in0.f32");
+      if (in0.size() != 192 * 256) {
+        fprintf(stderr, "probe-chain in0.f32 size %zu != 192*256\n", in0.size());
+        return 1;
+      }
+      Ort::Env menv(ORT_LOGGING_LEVEL_WARNING, "meloP");
+      Ort::SessionOptions mso;
+      mso.SetIntraOpNumThreads(1);
+      mso.SetInterOpNumThreads(1);
+      std::unique_ptr<Ort::Session> mid_ses;
+      if (!melo_midcpu.empty())
+        mid_ses = std::make_unique<Ort::Session>(menv, melo_midcpu.c_str(), mso);
+      std::vector<std::string> gB;
+      if (groups.size() == 2) gB = groups[1];
+      y = RunChainKpuCpuKpu(groups[0], gB, mid_ses.get(), in0, sid0);
+    } else {
+      // mirrors --melo-say 9-piece path: flow_a(zp,mk,sid) -> flow_b(o1,mk,sid)
+      // -> dq0..dq6 sequential (cur,sid); one kmodel resident at a time
+      std::vector<float> o1 = KpuRunScopedFlow(sub_parts[0], "meloP0", z, m, sid0);
+      dump_piece(0, o1);
+      std::vector<float> cur = KpuRunScopedFlow(sub_parts[1], "meloP1", o1, m, sid0);
+      dump_piece(1, cur);
+      o1.clear(); o1.shrink_to_fit();
+      for (size_t p = 2; p < sub_parts.size(); ++p) {
+        cur = KpuRunScoped(sub_parts[p], "meloP2", {cur.data(), &sid0});
+        dump_piece((int)p, cur);
+      }
+      y.swap(cur);
+    }
+    auto t1 = clk::now();
+    FILE *f = fopen((probe_chain + "/chain.f32").c_str(), "wb");
+    if (!f) { perror("fopen"); return 1; }
+    fwrite(y.data(), 4, y.size(), f);
+    fclose(f);
+    printf("[probe-chain] wrote chain.f32 (%zu floats, %.1f ms audio) in %.0f ms\n",
+           y.size(), y.size() / 44100.0 * 1000.0,
+           std::chrono::duration<double, std::milli>(t1 - t0).count());
+    mmz_shim_release_all();
+    _exit(0);
+  }
+
+  // ==== melo say: text -> lexicon frontend -> pregen (CPU ORT) -> subgen
+  // ==== (KPU, F=256 bucket) -> 44100Hz wav
+  if (!melo_say.empty()) {
+    if (melo_pregen.empty() || melo_subgen.empty() || melo_lexicon.empty() ||
+        melo_tokens.empty()) {
+      fprintf(stderr, "--melo-say needs --melo-pregen/--melo-subgen/--melo-lexicon/--melo-tokens\n");
+      return 1;
+    }
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    k230_kpu_init();
+    Ort::Env menv(ORT_LOGGING_LEVEL_WARNING, "melo");
+    Ort::SessionOptions mso;
+    mso.SetIntraOpNumThreads(1);
+    mso.SetInterOpNumThreads(1);
+    auto mem = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    Ort::Session pre(menv, melo_pregen.c_str(), mso);
+    // optional CPU flow (z_pre -> z_hat); kept on CPU because the K230 GNNE
+    // mis-executes the attention MatMuls inside the flow
+    std::unique_ptr<Ort::Session> flow_ses;
+    if (!melo_flow.empty()) {
+      // NOTE: 8-thread midcpu measured WORSE than 1 thread (56s vs 49s) —
+      // board ORT fp32 conv is scalar + memory-bound; keep 1 thread
+      Ort::SessionOptions fso;
+      fso.SetIntraOpNumThreads(1);
+      fso.SetInterOpNumThreads(1);
+      flow_ses = std::make_unique<Ort::Session>(menv, melo_flow.c_str(), fso);
+    }
+    std::unique_ptr<Ort::Session> mid_ses;
+    if (!melo_midcpu.empty()) {
+      Ort::SessionOptions cso;
+      cso.SetIntraOpNumThreads(1);
+      cso.SetInterOpNumThreads(1);
+      mid_ses = std::make_unique<Ort::Session>(menv, melo_midcpu.c_str(), cso);
+    }
+    // subgen may be ONE kmodel, several comma-separated pieces, or two
+    // '|' separated KPU groups around a --melo-midcpu CPU splice
+    std::vector<std::string> sub_parts;
+    auto groups0 = ParseSubgenGroups(melo_subgen);
+    for (auto &g : groups0)
+      sub_parts.insert(sub_parts.end(), g.begin(), g.end());
+    const bool spliced = groups0.size() == 2;
+    if ((!spliced && sub_parts.size() != 1 && sub_parts.size() != 4 &&
+         sub_parts.size() != 6 && sub_parts.size() != 7 && sub_parts.size() != 9) ||
+        (spliced && (groups0[0].empty() || groups0[1].empty()))) {
+      fprintf(stderr, "--melo-subgen must be 1, 4, 6, 7 or 9 comma-separated kmodels\n");
+      return 1;
+    }
+    std::vector<std::unique_ptr<KpuModel>> ksub;
+    // all layouts keep their pieces resident: reloading per sentence costs
+    // ~15s file IO per piece with cold caches
+    // composite entries "dq4chunk"/"dq5chunk" expand to per-chunk kmodels
+    // (the >32768-width GNNE zero bug forces resblock stages to run chunked
+    // in separate kmodels — the compiler re-fuses slices inside ONE model)
+    struct ChunkStage {
+      int kind = 0;                       // 4 or 5
+      std::vector<std::unique_ptr<KpuModel>> ms;  // 4: [head,c0,c1,c2] 5: [c0..c5]
+      std::vector<int> out_w;             // chunk output widths (frames)
+    };
+    std::map<int, ChunkStage> compos;     // sub_parts index -> stage
+    for (size_t pi = 0; pi < sub_parts.size(); ++pi) {
+      const std::string &p = sub_parts[pi];
+      if (p == "dq4chunk" || p == "dq5chunk") {
+        ChunkStage st;
+        st.kind = p == "dq4chunk" ? 4 : 5;
+        auto load = [&](const char *nm) {
+          st.ms.push_back(std::make_unique<KpuModel>(nm, "meloSub"));
+        };
+        if (st.kind == 4) {
+          load("./melo_dq4h.kmodel");
+          load("./melo_dq4hc0.kmodel");
+          load("./melo_dq4hc1.kmodel");
+          load("./melo_dq4hc2.kmodel");
+          st.out_w = {21845, 21846, 21845};
+        } else {
+          for (int ci = 0; ci < 6; ++ci) {
+            char nm[64];
+            snprintf(nm, sizeof nm, "./melo_dq5hc%d.kmodel", ci);
+            load(nm);
+          }
+          st.out_w = {21845, 21846, 21845, 21845, 21846, 21845};
+        }
+        compos[(int)pi] = std::move(st);
+        ksub.push_back(nullptr);          // placeholder keeps indices aligned
+      } else {
+        ksub.push_back(std::make_unique<KpuModel>(p, "meloSub"));
+      }
+    }
+
+    std::unordered_map<std::string, int64_t> tok2id;
+    {
+      std::ifstream tf(melo_tokens);
+      std::string line;
+      while (std::getline(tf, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t sp = line.find(' ');
+        if (sp != std::string::npos)
+          tok2id[line.substr(0, sp)] = std::stoll(line.substr(sp + 1));
+      }
+    }
+    // lexicon: word -> (phone ids, tone ids); halves format
+    struct WordEntry { std::vector<int64_t> ids, tones; };
+    std::vector<std::pair<std::string, WordEntry>> lex;
+    {
+      std::ifstream lf(melo_lexicon);
+      std::string line;
+      while (std::getline(lf, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::istringstream iss(line);
+        std::string w;
+        iss >> w;
+        for (auto &c : w) c = (char)tolower((unsigned char)c);
+        std::vector<std::string> parts;
+        std::string p;
+        while (iss >> p) parts.push_back(p);
+        if (parts.size() < 2 || (parts.size() & 1)) continue;
+        size_t n = parts.size() / 2;
+        WordEntry e;
+        bool ok = true;
+        for (size_t i = 0; i < n; ++i) {
+          auto it = tok2id.find(parts[i]);
+          if (it == tok2id.end()) { ok = false; break; }
+          e.ids.push_back(it->second);
+          e.tones.push_back(std::stoll(parts[n + i]));
+        }
+        if (ok && !e.ids.empty()) lex.emplace_back(w, std::move(e));
+      }
+      std::sort(lex.begin(), lex.end(),
+                [](auto &a, auto &b) { return a.first.size() > b.first.size(); });
+    }
+    printf("[melo] tokens=%zu lexicon=%zu\n", tok2id.size(), lex.size());
+
+    float ns = 0.667f, ls = 1.0f, nsw = 0.8f;
+    if (getenv("MELO_NS")) ns = atof(getenv("MELO_NS"));
+    if (getenv("MELO_LS")) ls = atof(getenv("MELO_LS"));
+    if (getenv("MELO_NSW")) nsw = atof(getenv("MELO_NSW"));
+
+    // frontend: greedy longest-match (byte-string) + punctuation split.
+    // Punctuation is NEVER fed to the model (sherpa's melo frontend drops it;
+    // feeding punct tokens garbles the audio). 。！？ end a sentence; ，、；：
+    // are recorded as fallback split points, used only when a sentence would
+    // exceed the F=256 frame bucket.
+    struct MeloSentence {
+      std::vector<std::pair<int64_t, int64_t>> ids;  // (phone id, tone)
+      std::vector<size_t> fallbacks;                 // comma split positions
+    };
+    std::vector<MeloSentence> sents;
+    {
+      MeloSentence cur;
+      // second field: 1 = ends a sentence, 0 = fallback split point only
+      static const std::pair<const char *, int> PUNCTS[] = {
+          {"。", 1}, {"！", 1}, {"？", 1},
+          {"，", 0}, {"、", 0}, {"；", 0}, {"：", 0}};
+      const std::string &text = melo_say;
+      size_t i = 0;
+      while (i < text.size()) {
+        bool matched = false;
+        for (const auto &w : lex) {
+          if (w.first.size() < 2 * 2) break;   // only multi-char words here
+          if (text.compare(i, w.first.size(), w.first) == 0) {
+            for (size_t k = 0; k < w.second.ids.size(); ++k)
+              cur.ids.push_back({w.second.ids[k], w.second.tones[k]});
+            i += w.first.size();
+            matched = true;
+            break;
+          }
+        }
+        if (matched) continue;
+        // single UTF-8 char
+        unsigned char c = text[i];
+        size_t cl = c < 0x80 ? 1 : (c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4));
+        std::string ch = text.substr(i, cl);
+        bool single = false;
+        for (const auto &w : lex) {
+          if (w.first == ch) {
+            for (size_t k = 0; k < w.second.ids.size(); ++k)
+              cur.ids.push_back({w.second.ids[k], w.second.tones[k]});
+            single = true;
+            break;
+          }
+        }
+        if (!single) {
+          bool is_punct = false;
+          for (const auto &pp : PUNCTS) {
+            if (ch == pp.first) {
+              if (pp.second) {
+                if (!cur.ids.empty()) { sents.push_back(std::move(cur)); cur = MeloSentence{}; }
+              } else if (!cur.ids.empty()) {
+                cur.fallbacks.push_back(cur.ids.size());
+              }
+              is_punct = true;
+              break;
+            }
+          }
+          if (!is_punct && cl == 1) {
+            auto it = tok2id.find(ch);
+            if (it != tok2id.end()) cur.ids.push_back({it->second, 0});
+          }
+        }
+        i += cl;
+      }
+      if (!cur.ids.empty()) sents.push_back(std::move(cur));
+    }
+    // A sentence longer than the frame bucket (T grows ~6.5 frames/phone
+    // with add_blank; F=256 caps at ~36 phones) is pre-split at comma
+    // fallbacks; the nsw retry below covers the remaining random overflow
+    {
+      const size_t MAX_PH = 36;
+      std::vector<MeloSentence> split;
+      for (auto &s : sents) {
+        if (s.ids.size() <= MAX_PH) { split.push_back(std::move(s)); continue; }
+        size_t start = 0;
+        while (start < s.ids.size()) {
+          size_t cut = s.ids.size();
+          for (size_t fb : s.fallbacks)
+            if (fb > start && fb - start <= MAX_PH) cut = fb;
+          if (cut - start > MAX_PH) cut = start + MAX_PH;
+          MeloSentence part;
+          part.ids.assign(s.ids.begin() + start, s.ids.begin() + cut);
+          split.push_back(std::move(part));
+          start = cut;
+        }
+      }
+      sents.swap(split);
+    }
+    printf("[melo] %zu sentences\n", sents.size());
+
+    const int F = 256;
+    std::vector<float> audio_out;
+    double t_pre = 0, t_kpu = 0;
+    int64_t one[1] = {1};
+    for (size_t si = 0; si < sents.size(); ++si) {
+      const size_t L = sents[si].ids.size();
+      if (L == 0) continue;
+      int64_t sid0 = 0;
+      // add_blank=1 model metadata: interleave blank id 0 between tokens
+      // (x and tones alike). Feeding tokens without blanks halves every
+      // duration and garbles the audio — this was the gibberish bug.
+      const int64_t Lb = (int64_t)(2 * L + 1);
+      std::vector<int64_t> ids(Lb, 0), tones(Lb, 0);
+      for (size_t j = 0; j < L; ++j) {
+        ids[2 * j + 1] = sents[si].ids[j].first;
+        tones[2 * j + 1] = sents[si].ids[j].second;
+      }
+      int64_t shp2[2] = {1, Lb};
+      int64_t xl = Lb;
+      const char *pin[] = {"x", "x_lengths", "tones", "sid", "noise_scale", "length_scale", "noise_scale_w"};
+      std::vector<Ort::Value> vi;
+      vi.push_back(Ort::Value::CreateTensor<int64_t>(mem, ids.data(), Lb, shp2, 2));
+      vi.push_back(Ort::Value::CreateTensor<int64_t>(mem, &xl, 1, one, 1));
+      vi.push_back(Ort::Value::CreateTensor<int64_t>(mem, tones.data(), Lb, shp2, 2));
+      vi.push_back(Ort::Value::CreateTensor<int64_t>(mem, &sid0, 1, one, 1));
+      vi.push_back(Ort::Value::CreateTensor<float>(mem, &ns, 1, one, 1));
+      vi.push_back(Ort::Value::CreateTensor<float>(mem, &ls, 1, one, 1));
+      vi.push_back(Ort::Value::CreateTensor<float>(mem, &nsw, 1, one, 1));
+      const char *pout[] = {"/Add_2_output_0", "/Cast_4_output_0"};
+      auto a1 = clk::now();
+      std::vector<Ort::Value> out = pre.Run(Ort::RunOptions{nullptr}, pin, vi.data(), 7, pout, 2);
+      int64_t T = out[0].GetTensorTypeAndShapeInfo().GetShape()[2];
+      if (T > F) {
+        // duration-predictor noise can push T past the frame bucket; retry
+        // with less duration noise — mild prosody change beats truncation
+        for (float nsw2 : {0.3f, 0.0f}) {
+          vi[6] = Ort::Value::CreateTensor<float>(mem, &nsw2, 1, one, 1);
+          out = pre.Run(Ort::RunOptions{nullptr}, pin, vi.data(), 7, pout, 2);
+          T = out[0].GetTensorTypeAndShapeInfo().GetShape()[2];
+          if (T <= F) break;
+        }
+      }
+      t_pre += ms(a1, clk::now());
+      const float *zp0 = out[0].GetTensorData<float>();
+      const float *mk0 = out[1].GetTensorData<float>();
+      if (T > F) { printf("[melo] sent %zu T=%ld > F, truncated\n", si, (long)T); }
+      const int64_t Tc = std::min<int64_t>(T, F);
+      std::vector<float> zp(192 * F, 0.f), mk(F, 0.f);
+      for (int64_t t = 0; t < Tc; ++t)
+        for (int ch = 0; ch < 192; ++ch) zp[ch * F + t] = zp0[ch * T + t];
+      for (int64_t t = 0; t < Tc; ++t) mk[t] = mk0[t];
+      if (flow_ses) {
+        // CPU flow on the padded F-frame window: z_pre+mask+sid -> z_hat
+        int64_t shp_flow[3] = {1, 192, F};
+        int64_t shp_mask[3] = {1, 1, F};
+        const char *fin[] = {"/Add_2_output_0", "/Cast_4_output_0", "sid"};
+        const char *fout[] = {"/Mul_10_output_0"};
+        std::vector<Ort::Value> fin_v;
+        fin_v.push_back(Ort::Value::CreateTensor<float>(mem, zp.data(), zp.size(), shp_flow, 3));
+        fin_v.push_back(Ort::Value::CreateTensor<float>(mem, mk.data(), mk.size(), shp_mask, 3));
+        fin_v.push_back(Ort::Value::CreateTensor<int64_t>(mem, &sid0, 1, one, 1));
+        auto fo = flow_ses->Run(Ort::RunOptions{nullptr}, fin, fin_v.data(), 3, fout, 1);
+        std::vector<float> zh(192 * F, 0.f);
+        memcpy(zh.data(), fo[0].GetTensorData<float>(), zh.size() * sizeof(float));
+        zp.swap(zh);
+      }
+      auto a2 = clk::now();
+      // F=256 frame bucket: final audio is 512 samples/frame (dq6 out);
+      // other layouts query their first/last kmodel IO sizes
+      auto groups = ParseSubgenGroups(melo_subgen);
+      const bool chain_layout =
+          sub_parts.size() == 9 || sub_parts.size() == 7 || groups.size() == 2;
+      std::vector<float> y(chain_layout ? 256u * 512u
+                                        : std::max(ksub[0]->output_bytes(0),
+                                                   ksub.back()->output_bytes(0)) /
+                                              sizeof(float));
+      if (ksub.size() == 1 && compos.empty()) {
+        ksub[0]->Run({zp.data(), mk.data(), &sid0}, {y.data()});
+      } else if (compos.size() || groups.size() == 2 || sub_parts.size() == 7) {
+        // (cur,sid) pieces with an optional mid-chain CPU splice and
+        // optional composite chunk-stages (dq4chunk/dq5chunk)
+        using clk2 = std::chrono::steady_clock;
+        std::vector<float> cur(zp);
+        size_t idx = 0;
+        auto run_piece = [&](size_t pi, std::vector<float> &c) {
+          auto cit = compos.find((int)pi);
+          if (cit != compos.end()) {
+            ChunkStage &st = cit->second;
+            auto t0 = clk2::now();
+            if (st.kind == 4) {
+              // head: (cur,sid) -> ct_out(32x65536); chunks feed FULL ct_out
+              std::vector<float> ct(st.ms[0]->output_bytes(0) / sizeof(float));
+              st.ms[0]->Run({c.data(), &sid0}, {ct.data()});
+              const int C = 32, W = 65536;
+              std::vector<float> lr4((size_t)C * W);
+              size_t off = 0;
+              for (int ci = 0; ci < 3; ++ci) {
+                std::vector<float> oc(st.ms[1 + ci]->output_bytes(0) / sizeof(float));
+                st.ms[1 + ci]->Run({ct.data(), &sid0}, {oc.data()});
+                size_t ow = oc.size() / C;
+                for (int ch = 0; ch < C; ++ch)
+                  memcpy(&lr4[(size_t)ch * W + off], &oc[(size_t)ch * ow],
+                         ow * sizeof(float));
+                off += ow;
+              }
+              c.swap(lr4);
+            } else {
+              const int C = 16, W = 131072;
+              std::vector<float> lr5((size_t)C * W);
+              size_t acc = 0;
+              for (int ci = 0; ci < 6; ++ci) {
+                size_t bytes = st.ms[ci]->output_bytes(0);
+                std::vector<float> oc(bytes / sizeof(float));
+                st.ms[ci]->Run({c.data(), &sid0}, {oc.data()});
+                size_t ow = oc.size() / C;
+                for (int ch = 0; ch < C; ++ch)
+                  memcpy(&lr5[(size_t)ch * W + acc], &oc[(size_t)ch * ow],
+                         ow * sizeof(float));
+                acc += ow;
+              }
+              c.swap(lr5);
+            }
+            fprintf(stderr, "[chain-t] %s composite %.1f ms\n",
+                    st.kind == 4 ? "dq4chunk" : "dq5chunk",
+                    std::chrono::duration<double, std::milli>(clk2::now() - t0).count());
+          } else {
+            auto t0 = clk2::now();
+            std::vector<float> nxt(ksub[pi]->output_bytes(0) / sizeof(float));
+            ksub[pi]->Run({c.data(), &sid0}, {nxt.data()});
+            fprintf(stderr, "[chain-t] %s %.1f ms\n", ksub[pi]->path().c_str(),
+                    std::chrono::duration<double, std::milli>(clk2::now() - t0).count());
+            c.swap(nxt);
+          }
+        };
+        size_t nA = groups.size() == 2 ? groups[0].size() : sub_parts.size();
+        for (size_t p = 0; p < nA; ++p) run_piece(idx++, cur);
+        if (mid_ses) {
+          auto t0 = clk2::now();
+          Ort::MemoryInfo mem2 = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+          auto ish = mid_ses->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+          int64_t shp[3] = {1, ish[1], ish[2]};
+          int64_t one2[1] = {1};
+          const char *in_names[] = {"/dec/LeakyRelu_3_output_0", "sid"};
+          const char *out_names[] = {"/dec/LeakyRelu_5_output_0"};
+          std::vector<Ort::Value> iv;
+          iv.push_back(Ort::Value::CreateTensor<float>(mem2, (float *)cur.data(), cur.size(), shp, 3));
+          iv.push_back(Ort::Value::CreateTensor<int64_t>(mem2, &sid0, 1, one2, 1));
+          auto ov = mid_ses->Run(Ort::RunOptions{nullptr}, in_names, iv.data(), 2, out_names, 1);
+          size_t n = (size_t)ov[0].GetTensorTypeAndShapeInfo().GetElementCount();
+          std::vector<float> out2(n);
+          memcpy(out2.data(), ov[0].GetTensorData<float>(), n * sizeof(float));
+          fprintf(stderr, "[chain-t] MIDCPU %.1f ms\n",
+                  std::chrono::duration<double, std::milli>(clk2::now() - t0).count());
+          cur.swap(out2);
+        }
+        if (groups.size() == 2)
+          for (size_t p = 0; p < groups[1].size(); ++p) run_piece(idx++, cur);
+        y.swap(cur);
+      } else if (sub_parts.size() == 9) {
+        // 9-piece: flow_a, flow_b, dq0..dq6 — after flow_b every piece is
+        // (prev_out, sid) — pure sequential, no mask/mul10 skips; one kmodel
+        // resident at a time
+        std::vector<float> o1 = KpuRunScopedFlow(sub_parts[0], "meloP0", zp, mk, sid0);
+        std::vector<float> cur = KpuRunScopedFlow(sub_parts[1], "meloP1", o1, mk, sid0);
+        for (size_t p = 2; p < sub_parts.size(); ++p)
+          cur = KpuRunScoped(sub_parts[p], "meloP2", {cur.data(), &sid0});
+        y.swap(cur);
+      } else if (sub_parts.size() == 7) {
+        // CPU-flow layout: dq0..dq6 sequential (cur,sid); cur starts as z_hat
+        std::vector<float> cur = KpuRunScoped(sub_parts[0], "meloP0", {zp.data(), &sid0});
+        for (size_t p = 1; p < sub_parts.size(); ++p)
+          cur = KpuRunScoped(sub_parts[p], "meloP2", {cur.data(), &sid0});
+        y.swap(cur);
+      } else {
+        // multi-piece chain (4: fa,fb,da,db | 6: fa,fb,d1,d2a,d2b,d3)
+        std::vector<float> o1(ksub[0]->output_bytes(0) / sizeof(float));
+        ksub[0]->Run({zp.data(), mk.data(), &sid0}, {o1.data()});          // flow_a
+        std::vector<float> o2(ksub[1]->output_bytes(0) / sizeof(float));
+        ksub[1]->Run({o1.data(), mk.data(), &sid0}, {o2.data()});          // flow_b -> mul10
+        if (ksub.size() == 4) {
+          std::vector<float> o3(ksub[2]->output_bytes(0) / sizeof(float));
+          ksub[2]->Run({o2.data(), &sid0}, {o3.data()});                   // dec_a
+          ksub[3]->Run({o3.data(), o2.data(), &sid0}, {y.data()});         // dec_b
+        } else {
+          std::vector<float> o3(ksub[2]->output_bytes(0) / sizeof(float));
+          ksub[2]->Run({o2.data(), &sid0}, {o3.data()});                   // d1
+          std::vector<float> o4(ksub[3]->output_bytes(0) / sizeof(float));
+          ksub[3]->Run({o3.data(), o2.data(), &sid0}, {o4.data()});        // d2a
+          std::vector<float> o5(ksub[4]->output_bytes(0) / sizeof(float));
+          ksub[4]->Run({o4.data(), o2.data(), &sid0}, {o5.data()});        // d2b
+          ksub[5]->Run({o5.data(), o2.data(), &sid0}, {y.data()});         // d3
+        }
+      }
+      t_kpu += ms(a2, clk::now());
+      const int64_t n = Tc * 512;
+      for (int64_t j = 0; j < n && j < (int64_t)y.size(); ++j) audio_out.push_back(y[j]);
+      printf("  [melo] sent %zu: %zu tok -> T=%ld -> %.2fs\n", si, L, (long)T, n / 44100.0);
+    }
+    sherpa_onnx::WriteWave(out_wav, 44100, audio_out.data(), audio_out.size());
+    const double audio_s = (double)audio_out.size() / 44100.0;
+    printf("[melo] DONE %s audio=%.2fs pre=%.0fms kpu=%.0fms RTF=%.3f\n",
+           out_wav.c_str(), audio_s, t_pre, t_kpu, (t_pre + t_kpu) / 1000.0 / audio_s);
+    mmz_shim_release_all();
+    _exit(0);
+  }
 
   // ==== matcha probe: acoustic (CPU) + vocoder ORT vs KPU comparison ====
   // ==== matcha say: text -> (greedy longest-match lexicon) -> acoustic CPU
@@ -327,6 +1912,9 @@ int main(int argc, char *argv[]) {
     // full-KPU mode: A-kmodel (encoder+DP) + CPU one-hot + C128 windows
     const bool abc_mode = !matcha_a_kmodel.empty() &&
                          (!matcha_c_kmodel.empty() || !matcha_c_onnx.empty());
+    // est mode: A+B on CPU (matcha_ab.onnx via --matcha-acoustic) + est128
+    // single-step decoder kmodel (3 Euler calls per 128-frame window)
+    const bool est_mode = !matcha_est_kmodel.empty();
     using clk = std::chrono::steady_clock;
     auto ms = [](clk::time_point a, clk::time_point b) {
       return std::chrono::duration<double, std::milli>(b - a).count();
@@ -342,9 +1930,17 @@ int main(int argc, char *argv[]) {
       aco = std::make_unique<Ort::Session>(menv, matcha_acoustic.c_str(), mso);
     std::unique_ptr<KpuModel> kvoc;
     std::unique_ptr<Ort::Session> ovoc;
-    std::unique_ptr<KpuModel> kA, kC;
+    std::unique_ptr<KpuModel> kA, kC, kEst;
     std::unique_ptr<Ort::Session> cOrt;
-    if (abc_mode) {
+    if (est_mode) {
+      if (matcha_acoustic.empty() && matcha_a_kmodel.empty()) {
+        fprintf(stderr, "--matcha-est-kmodel needs --matcha-acoustic=<matcha_ab.onnx> or --matcha-a-kmodel\n");
+        return 1;
+      }
+      kEst = std::make_unique<KpuModel>(matcha_est_kmodel, "matchaEst");
+      if (!matcha_a_kmodel.empty())
+        kA = std::make_unique<KpuModel>(matcha_a_kmodel, "matchaA");
+    } else if (abc_mode) {
       kA = std::make_unique<KpuModel>(matcha_a_kmodel, "matchaA");
       if (!matcha_c_kmodel.empty())
         kC = std::make_unique<KpuModel>(matcha_c_kmodel, "matchaC");
@@ -477,7 +2073,7 @@ int main(int argc, char *argv[]) {
     if (getenv("MATCHA_NS")) ns = atof(getenv("MATCHA_NS"));
     std::vector<float> audio_out;
     std::vector<float> ort_out;
-    double t_aco = 0, t_kpu = 0;
+    double t_aco = 0, t_kpu = 0, t_ab = 0, t_estk = 0;
     for (size_t si = 0; si < sents.size(); ++si) {
       const auto &ids = sents[si];
       const int64_t L = (int64_t)ids.size();
@@ -493,7 +2089,122 @@ int main(int argc, char *argv[]) {
       auto a = clk::now();
       std::vector<float> mel_full;   // [80 * Lm] channel-major
       int64_t Lm = 0;
-      if (abc_mode) {
+      if (est_mode) {
+        // ===== A+B: KPU (matcha_A + CPU one-hot) or CPU (matcha_ab.onnx)
+        // ===== + est128 KPU: 3 Euler steps per 128-frame window =====
+        const float *mm = nullptr;      // [Lp,80] t-major expanded mu
+        const float *msk = nullptr;     // [1,1,Lp]
+        std::vector<float> mm_own, msk_own;
+        int64_t Lp = 0;
+        if (kA) {
+          const int64_t XB = 256;
+          std::vector<int64_t> x_b(XB, 1);
+          memcpy(x_b.data(), ids.data(), L * sizeof(int64_t));
+          int64_t xlA = L;             // ACTUAL token count (pads masked)
+          float lsA = 1.0f;
+          std::vector<float> dur(kA->output_bytes(0) / 4);   // [1,256]
+          std::vector<float> hid(kA->output_bytes(1) / 4);   // [1,80,256]
+          auto a2 = clk::now();
+          kA->Run({x_b.data(), &xlA, &lsA}, {dur.data(), hid.data()});
+          t_ab += ms(a2, clk::now());
+          const int Ln = (int)L;
+          std::vector<int> lo(Ln), hi(Ln);
+          float acc = 0;
+          for (int i2 = 0; i2 < Ln; ++i2) {
+            lo[i2] = (int)acc;
+            acc += dur[i2];
+            hi[i2] = (int)acc;
+          }
+          if (hi[Ln - 1] < (int)acc) hi[Ln - 1] = (int)acc;
+          Lp = hi[Ln - 1];
+          mm_own.assign(Lp * 80, 0.0f);
+          msk_own.assign(Lp, 1.0f);
+          for (int n_i = 0; n_i < Ln; ++n_i)
+            for (int t = lo[n_i]; t < hi[n_i] && t < (int)Lp; ++t)
+              for (int ch = 0; ch < 80; ++ch)
+                mm_own[t * 80 + ch] = hid[ch * XB + n_i];
+          mm = mm_own.data();
+          msk = msk_own.data();
+        } else {
+          const char *ab_out[] = {"/MatMul_output_0", "/Cast_3_output_0"};
+          auto a2 = clk::now();
+          auto out = aco->Run(Ort::RunOptions{nullptr}, in, vi.data(), 4, ab_out, 2);
+          t_ab += ms(a2, clk::now());
+          Lp = out[0].GetTensorTypeAndShapeInfo().GetShape()[1];
+          // MUST copy: `out` dies at this block's end (use-after-free corrupted
+          // mm/msk nondeterministically before)
+          const float *src0 = out[0].GetTensorData<float>();
+          const float *src1 = out[1].GetTensorData<float>();
+          mm_own.assign(src0, src0 + Lp * 80);
+          msk_own.assign(src1, src1 + Lp);
+          mm = mm_own.data();
+          msk = msk_own.data();
+        }
+        mel_full.assign(80 * Lp, 0.0f);
+        if (getenv("MATCHA_DUMP_MM")) {
+          char p[256];
+          snprintf(p, sizeof(p), "%s.mm.f32", out_wav.c_str());
+          FILE *f = fopen(p, "ab");
+          if (f) { fwrite(mm, 4, Lp * 80, f); fwrite(msk, 4, Lp, f); fclose(f); }
+        }
+        std::mt19937 rng(0xC0FFEEu + (uint32_t)si);
+        std::normal_distribution<float> g(0.f, ns);
+        const int WB = 128;
+        // back-aligned windows: every window with Lp>WB is FULL of real frames
+        // (padded tail windows corrupt real frames: GN group stats + attention
+        // pad keys; measured cos 0.83 tiled vs 0.999 back-aligned)
+        std::vector<int64_t> starts;
+        {
+          int64_t c0 = 0;
+          while (c0 + WB < Lp) {
+            starts.push_back(c0);
+            c0 += WB;
+          }
+          starts.push_back(std::max<int64_t>(0, Lp - WB));
+        }
+        std::vector<float> x(80 * WB), muW(80 * WB), v(80 * WB), mk(WB);
+        int win_idx = 0;
+        for (int64_t c0 : starts) {
+          const int f = (int)std::min<int64_t>(WB, Lp - c0);
+          std::fill(mk.begin(), mk.end(), 0.0f);
+          for (int t = 0; t < f; ++t) {
+            mk[t] = msk[c0 + t];
+            for (int ch = 0; ch < 80; ++ch)
+              muW[ch * WB + t] = mm[(c0 + t) * 80 + ch];
+          }
+          for (auto &e : x) e = g(rng);
+          if (getenv("MATCHA_DUMP_WIN")) {
+            char p[256];
+            snprintf(p, sizeof(p), "%s.win%zu_%d", out_wav.c_str(), si, win_idx);
+            FILE *wf = fopen(p, "wb");
+            if (wf) {
+              fwrite(muW.data(), 4, muW.size(), wf);
+              fwrite(mk.data(), 4, mk.size(), wf);
+              fwrite(x.data(), 4, x.size(), wf);
+              fclose(wf);
+            }
+          }
+          auto a3 = clk::now();
+          for (int k = 0; k < 3; ++k) {
+            float t = k / 3.0f;
+            kEst->Run({x.data(), mk.data(), muW.data(), &t}, {v.data()});
+            for (int i = 0; i < 80 * WB; ++i) x[i] += v[i] / 3.0f;
+          }
+          t_estk += ms(a3, clk::now());
+          if (getenv("MATCHA_DUMP_WIN")) {
+            char p[256];
+            snprintf(p, sizeof(p), "%s.winmel%zu_%d", out_wav.c_str(), si, win_idx);
+            FILE *wf = fopen(p, "wb");
+            if (wf) { fwrite(x.data(), 4, x.size(), wf); fclose(wf); }
+          }
+          win_idx++;
+          for (int ch = 0; ch < 80; ++ch)
+            for (int t = 0; t < f; ++t)
+              mel_full[ch * Lp + c0 + t] = x[ch * WB + t] * 2.7628188f - 5.9870973f;
+        }
+        Lm = Lp;
+        t_aco += ms(a, clk::now());
+      } else if (abc_mode) {
         // ===== A (KPU) + B (CPU one-hot) + C128 windows (KPU) =====
         const int64_t XB = 256, WB = 128;
         std::vector<int64_t> x_b(XB, 1);
@@ -650,6 +2361,21 @@ int main(int argc, char *argv[]) {
       // 20ms fade-out at the sentence tail (last chunk's boundary artifact)
       const size_t fade = std::min<size_t>(n, 441);
       for (size_t j = 0; j < fade; ++j) wav[n - fade + j] *= (float)(1.0 - (double)j / fade);
+      if (!voc_is_ort) {
+        // notch out the hifigan KPU quantization tone at exactly sr/4
+        // (5512.5 Hz @ 22050; measured peak/band ~21x, present since f1)
+        // RBJ notch w0=pi/2, Q=25: y = b0*(x[n]+x[n-2]) - a2*y[n-2]
+        const float alpha = 1.0f / (2.0f * 25.0f);
+        const float b0 = 1.0f / (1.0f + alpha);
+        const float a2 = (1.0f - alpha) / (1.0f + alpha);
+        float xm2 = 0, ym2 = 0, xm1 = wav.empty() ? 0 : wav[0], ym1 = 0;
+        for (size_t j = 0; j < n; ++j) {
+          const float y = b0 * (wav[j] + xm2) - a2 * ym2;
+          xm2 = xm1; xm1 = wav[j];
+          ym2 = ym1; ym1 = y;
+          wav[j] = y;
+        }
+      }
       audio_out.insert(audio_out.end(), wav.begin(), wav.begin() + n);
       if (voc_dual && ovoc) {
         // same-mel ORT reference for A/B: exact-length vocoding
@@ -677,8 +2403,13 @@ int main(int argc, char *argv[]) {
       printf("[matcha] wav write %.1fms\n", ms(a, clk::now()));
     }
     const double audio_s = (double)audio_out.size() / 22050.0;
-    printf("[matcha] DONE %s audio=%.2fs aco=%.0fms kpu=%.0fms RTF=%.3f\n",
-           out_wav.c_str(), audio_s, t_aco, t_kpu, (t_aco + t_kpu) / 1000.0 / audio_s);
+    if (est_mode)
+      printf("[matcha] DONE %s audio=%.2fs aco=%.0fms (ab=%.0fms estk=%.0fms) kpu=%.0fms RTF=%.3f\n",
+             out_wav.c_str(), audio_s, t_aco, t_ab, t_estk, t_kpu,
+             (t_aco + t_kpu) / 1000.0 / audio_s);
+    else
+      printf("[matcha] DONE %s audio=%.2fs aco=%.0fms kpu=%.0fms RTF=%.3f\n",
+             out_wav.c_str(), audio_s, t_aco, t_kpu, (t_aco + t_kpu) / 1000.0 / audio_s);
     mmz_shim_release_all();
     _exit(0);
   }

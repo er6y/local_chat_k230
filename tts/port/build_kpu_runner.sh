@@ -42,6 +42,7 @@ $CXX $CXXFLAGS \
   -L$SHERPA_BUILD/install/lib \
   -L$SHERPA_BUILD/lib \
   -lsherpa-onnx-core -lsherpa-onnx-kaldifst-core -lsherpa-onnx-fst -lsherpa-onnx-fstfar -lonnxruntime \
+  $SHERPA_BUILD/lib/libpiper_phonemize.a $SHERPA_BUILD/lib/libespeak-ng.a $SHERPA_BUILD/lib/libssentencepiece_core.a $SHERPA_BUILD/lib/libucd.a \
   -L$RT/lib \
   -Wl,--start-group \
   -Wl,--whole-archive $RT/lib/libnncase.rt_modules.k230.a -Wl,--no-whole-archive \

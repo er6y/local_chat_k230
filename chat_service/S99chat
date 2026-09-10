@@ -1,0 +1,36 @@
+#!/bin/sh
+# 开机自启：常驻对话服务（后台启动不阻塞开机）
+# 启动顺序（2026-09-09 定版）：LLM（DAEMON 模式）-> KPU daemon -> TTS。
+# llmd 带 DIRECT_IO（456MB 权重全在 zone，零 CMA 占用零溢出，实测
+# after-llmd CmaFree 677MB）+ ubatch64；daemon 预热 196/196 需全空 CMA，
+# 排在 llmd 之后仍成功（llmd 不借 CMA）。llmd 必须是 DAEMON 模式：
+# KPU_LOCAL 会做本地 gnne_init（/dev/mem 直写 GNNE 寄存器），与 daemon
+# 的 GNNE 硬件状态冲突 → daemon warm 必段错误（2026-09-09 实录）。
+# 注：KPU_LOCAL 全量预载路径本身也段错误（preload 循环 rc=139），未用。
+case "$1" in
+  start)
+    ( sleep 10
+      . /mnt/data/chat/chat.conf
+      TR=/tmp/chat/boot_trace.log
+      mark() { echo "$(date +%T) $1 $(grep CmaFree /proc/meminfo | awk '{print $2}')kB" >> $TR; }
+      echo "=== boot $(date +%T) ===" >> $TR
+      # 顺序=LLM -> TTS -> KPU daemon（2026-09-10 定版）：
+      # 1) llmd 必须第一：DIO 456MB 权重装空 zone（后两者驻留时 zone 不够，
+      #    加载 rc=137 OOM 实录）；DAEMON 模式不做本地 gnne_init，无硬件冲突。
+      # 2) TTS 第二：拿未碎片化的 ~660MB CMA，其 6.7MB 连续 mmz 分配不再
+      #    失败（daemon 驻留后启动则 rc=134 必现）。
+      # 3) daemon 最后：TTS 钉掉 ~140MB 后仍有 ~520MB，够 150 stems 段
+      #    +运行时钉死（~405MB）；196 stems 需 ~422MB，余量过薄暂用 150。
+      if [ "$KPU_ENABLE" = "1" ]; then
+        sh /mnt/data/chat/svc_kpu.sh start;  mark after-kpu
+      fi
+      sh /mnt/data/chat/svc_tts.sh start;  mark after-tts
+      sh /mnt/data/chat/svc_llm.sh start;  mark after-llmd
+    ) &
+    ;;
+  stop)
+    sh /mnt/data/chat/svc_tts.sh stop
+    sh /mnt/data/chat/svc_kpu.sh stop 2>/dev/null
+    sh /mnt/data/chat/svc_llm.sh stop
+    ;;
+esac

@@ -386,9 +386,9 @@ uint64_t __wrap_gnne_enable(uint64_t pc_s, uint64_t pc_e, uint64_t pc_bp) {
         GTRC("[gnne] local mode: pass-through enable\n");
         return __real_gnne_enable(pc_s, pc_e, pc_bp);
     }
-    if (gnne_l2p < 0) gnne_l2p = getenv("GNNE_L2P") ? atoi(getenv("GNNE_L2P")) : 1;
+    if (gnne_l2p < 0) gnne_l2p = getenv("GNNE_L2P") ? atoi(getenv("GNNE_L2P")) : 0;
     if (gnne_l2stage < 0) gnne_l2stage = getenv("GNNE_L2STAGE") ? atoi(getenv("GNNE_L2STAGE")) : 0;
-    if (gnne_cstage < 0) gnne_cstage = getenv("GNNE_CSTAGE") ? atoi(getenv("GNNE_CSTAGE")) : 1;
+    if (gnne_cstage < 0) gnne_cstage = getenv("GNNE_CSTAGE") ? atoi(getenv("GNNE_CSTAGE")) : 0;
     uint64_t ps = 0, pe = 0, span = pc_e > pc_s ? pc_e - pc_s : 0;
     if (gnne_cstage && span && span <= CSTAGE_SZ) {
         ps = gnne_cma_stage(pc_s, pc_e);

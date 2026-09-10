@@ -1,0 +1,14 @@
+#!/bin/sh
+# ask.sh "问题" — 提问 → 打印回答；语音由流水 TTS 自动边生成边播出
+Q=$(echo "$*" | tr '\t' ' ')
+OUT=/tmp/chat/ask_out.txt
+[ -z "$Q" ] && { echo '用法: sh /mnt/data/chat/ask.sh 你的问题'; exit 1; }
+LB=$(grep -c '^DONE' /tmp/chat/llm_out.log 2>/dev/null); [ -z "$LB" ] && LB=0
+printf '%s\t96\t%s\n' "$OUT" "$Q" > /tmp/chat/llm_in
+echo '(思考中，语音边生成边播出...)'; n=0
+while [ $n -lt 240 ]; do
+  now=$(grep -c '^DONE' /tmp/chat/llm_out.log 2>/dev/null); [ -z "$now" ] && now=0
+  [ "$now" -gt "$LB" ] && break
+  sleep 1; n=$((n+1))
+done
+echo '回答:'; cat $OUT 2>/dev/null; echo
