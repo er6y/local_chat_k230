@@ -17,7 +17,7 @@ import _nncase
 import nncase_kpu
 
 GGUF = "/root/qwen3-q4km.gguf"
-OUTDIR = "/tmp/kpu_poc/qwen_s16sqb"
+OUTDIR = os.environ.get("KPU_OUTDIR", "/tmp/kpu_poc/qwen_s16sqb")
 S = 16
 CALIB_DIR = f"/tmp/kpu_poc/calib16_clean"   # 干净校准（CPU 路径原始激活）
 NLAYERS = 28
@@ -144,8 +144,11 @@ def _init_worker():
 
 def build_layer(li):
     entries = []
+    no_sq = bool(os.environ.get("KPU_NO_SQ"))   # 2026-09-10：SmoothQuant 走
+    # k230 per-tensor 输入量化必然坏（真机 17% 误差，见 repro）；置 KPU_NO_SQ
+    # 导出无 svec 的纯 int8 版（daemon sc=None 不做 /s，真机 1.3% 正常误差）
     for tag, W in gemm_specs(_R, li):
-        sv = calc_smooth_s(f"l{li}_{tag}", W.shape[1])
+        sv = None if no_sq else calc_smooth_s(f"l{li}_{tag}", W.shape[1])
         entries.append(build_onnx_and_kmodel(f"l{li}_{tag}", W, OUTDIR,
                                              want_probe=(li == 0), svec=sv))
     return entries

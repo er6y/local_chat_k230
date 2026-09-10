@@ -24,11 +24,13 @@ import nncaseruntime as nn
 SOCK = "/tmp/kpu_gemm.sock"
 D_S1 = "/mnt/data/kpu_qwen/s1_sq"    # M=1 exact tile: pure weight-DMA floor
 D_S4 = "/mnt/data/kpu_qwen/s4_sq"
-D_S16 = "/mnt/data/kpu_qwen/s16b"    # era-B 重导出（mk_sq16b.py，W*s + x/s）；老 s16_sq 是 era-A 方向，乱码
+D_S16 = os.environ.get("KPUD_S16_DIR",
+                       "/mnt/data/kpu_qwen/s16b")  # era-B 重导出（mk_sq16b.py，W*s + x/s）；老 s16_sq 是 era-A 方向，乱码
 # 内存实测（2026-09，drop_caches 后）：S16 era-B 全量 196 个 = 450MB
 # （2.29MB/interp），加载 21s；载完 CmaFree 仍余 438MB，与 TTS（~150MB）
 # 共存无压力。此前的"装不下"是页缓存挤占 CMA 区的假象（drop_caches 回收
 # ~320MB）。生产静态配比：CAP16=196, CAP4=0, CAP1=0（decode M<32 走 CPU）。
+IO_SCALE = float(os.environ.get("KPUD_IO_SCALE", "1.0"))
 CAPS = {1: int(os.environ.get("KPUD_CAP1", "196")),
         4: int(os.environ.get("KPUD_CAP4", "20")),
         16: int(os.environ.get("KPUD_CAP16", "0"))}
@@ -168,6 +170,12 @@ def handle(stem, mt, x):
         # （kmodel 内 W*s，fold 除法 x/s）。老 s16_sq 是 era-A（W/s + x*s）
         # 已弃用。selftest 探针回灌对域盲，不能当方向判据。
         inp[0, :, :mt] /= sc.reshape(K, 1)
+    elif IO_SCALE != 1.0:
+        # 量化裕量：PTQ 范围按校准集标定，真实 prompt 激活超出即静默削顶
+        # （实测 1.3× 时 rel_max 1.7%→11.5%，e2e 算术被带错）。GEMM 线性，
+        # 输入乘 s、输出除回 s 等效把削顶上限放宽 1/s 倍，代价 int8 分辨率
+        # 降为 s 倍（s=0.5 实测 rel_max 2.8%）。0=纯校准域语义不变。
+        inp[0, :, :mt] *= IO_SCALE
     inp = inp.reshape(1, K, S, S)
     _t_f1 = time.time_ns()
     t = nn.RuntimeTensor.from_numpy(inp)
@@ -181,6 +189,8 @@ def handle(stem, mt, x):
     _ph["run"] = _ph.get("run", 0) + (_t_r1 - _t_r0) // 1000
     _ph["out"] = _ph.get("out", 0) + (_t_o1 - _t_r1) // 1000
     y = out.reshape(OUT, MT)[:, :mt].T.copy()      # [mt, OUT]
+    if IO_SCALE != 1.0:
+        y /= IO_SCALE
     return y.reshape(-1), None
 
 
@@ -291,8 +301,11 @@ def serve():
                     stats["us"] += dt
                     if err:
                         stats["errs"] += 1
-                        conn.sendall(struct.pack("<II", 0x4B505547, 1) +
-                                     err.encode()[:255])
+                        log(f"ERR {stem}: {err[:120]}")
+                        # 错误响应必须是定长 8B：llmd 客户端出错只读头不读
+                        # 附加字节，多发的错误文本会留在流里被下一次请求当成
+                        # 响应头 -> 协议永久失步（e2e 答案被带坏的根因）
+                        conn.sendall(struct.pack("<II", 0x4B505547, 1))
                     else:
                         conn.sendall(struct.pack("<II", 0x4B505547, 0) +
                                      y.astype(np.float32).tobytes())

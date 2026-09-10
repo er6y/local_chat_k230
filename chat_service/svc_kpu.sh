@@ -39,6 +39,7 @@ case "$1" in
         # （两段式，见 daemon warm 块）；min_free 提到 128MB 压 compaction
         # 保 order:10。KPUD_WARM=0 = 运行期惰性首跑（旧行为，调试用）。
         KPUD_CAP1=0 KPUD_CAP4=0 KPUD_CAP16=$KPU_CAP16 KPUD_WARM=1 \
+        KPUD_IO_SCALE=${KPU_IO_SCALE:-1.0} \
           python3 /mnt/data/kpu_llm/kpu_gemm_daemon.py >> $KLOG 2>&1
         rc=$?
         echo "[svc] daemon exited rc=$rc $(date)" >> $KLOG

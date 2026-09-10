@@ -34,8 +34,10 @@ for tag in (sys.argv[1:] or ["l0_q", "l0_o"]):
     x = np.load(f"{D}/xreal_{tag}.npy")[0].reshape(-1, MT)   # [IN,256] raw 域
     yref = np.load(f"{D}/yref_{tag}.npy")[0].reshape(-1, MT).T  # [256,OUT]
     IN, OUT = x.shape[0], yref.shape[1]
-    sc = np.fromfile(f"{D}/{tag}.scale", dtype=np.float32)
-    raw = (x * sc[:, None]).T.astype(np.float32)             # daemon /s 后还原 x
+    # plain int8 部署（无 SmoothQuant）：daemon 不除 s，直接喂 raw 域激活。
+    # 旧版这里残留 x*s（SQ 语义），scale 文件已删却仍乘 -> 输出错约一倍，即
+    # 98.8%/107.7% 假 BROKEN 的根因。kmodel 本身始终是对的（l0_q==r6_q md5 相同）。
+    raw = x.T.astype(np.float32)
     y, code = call(tag, MT, raw, OUT)
     if code != 0:
         print(f"{tag}: daemon err {code}"); continue
