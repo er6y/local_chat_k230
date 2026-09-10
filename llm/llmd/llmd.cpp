@@ -189,6 +189,8 @@ static std::string render_base(const std::string & s) {
 
 int main(int argc, char ** argv) {
     std::string model_path;
+    // 精简版(38tok,省33% prefill)实测会让 0.6B 跑出 think 外泄+复读——
+    // 指令密度是这个尺寸模型的"行为锚"，勿瘦（2026-09-10 A/B 定案）
     std::string system_prompt =
         "你是语音助手小K。用户说的\"我\"永远指用户本人，不是你。"
         "用户告诉你的名字和信息都要记住，回答要简短口语化。";

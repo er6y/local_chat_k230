@@ -40,12 +40,14 @@ case "$1" in
         KPU_ARG="--kpu"
       fi
       fi
+      LLSYS_ARG=""
+      [ -n "$LLM_SYS" ] && LLSYS_ARG="--system $LLM_SYS"
       nohup env LD_LIBRARY_PATH=/mnt/data/kpu_llm LD_BIND_NOW=1 $KPU_ENV \
         LLMD_TTS_FIFO=$RUN/tts_in \
         LLMD_UBATCH=${LLMD_UBATCH:-256} \
         sh /mnt/data/kpu_llm/safe_run.sh $LLOG \
         $LLMD --model $LLM_MODEL $KPU_ARG --ctx-size $LLM_CTX --n-predict $LLM_PREDICT \
-          --temp $LLM_TEMP --top-p $LLM_TOP_P --top-k $LLM_TOP_K \
+          --temp $LLM_TEMP --top-p $LLM_TOP_P --top-k $LLM_TOP_K $LLSYS_ARG \
         < $RUN/llm_in > /dev/null 2>&1 &
       n=0
       sleep 2   # 给 nohup->env->safe_run->exec 链一点启动时间，否则下面 pgrep
