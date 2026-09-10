@@ -299,16 +299,21 @@ def serve():
                     stats["calls"] += 1
                     stats["tiles"] += mt
                     stats["us"] += dt
-                    if err:
-                        stats["errs"] += 1
-                        log(f"ERR {stem}: {err[:120]}")
-                        # 错误响应必须是定长 8B：llmd 客户端出错只读头不读
-                        # 附加字节，多发的错误文本会留在流里被下一次请求当成
-                        # 响应头 -> 协议永久失步（e2e 答案被带坏的根因）
-                        conn.sendall(struct.pack("<II", 0x4B505547, 1))
-                    else:
-                        conn.sendall(struct.pack("<II", 0x4B505547, 0) +
-                                     y.astype(np.float32).tobytes())
+                    try:
+                        if err:
+                            stats["errs"] += 1
+                            log(f"ERR {stem}: {err[:120]}")
+                            # 错误响应必须是定长 8B：llmd 客户端出错只读头不读
+                            # 附加字节，多发的错误文本会留在流里被下一次请求当成
+                            # 响应头 -> 协议永久失步（e2e 答案被带坏的根因）
+                            conn.sendall(struct.pack("<II", 0x4B505547, 1))
+                        else:
+                            conn.sendall(struct.pack("<II", 0x4B505547, 0) +
+                                         y.astype(np.float32).tobytes())
+                    except (TimeoutError, socket.timeout, ConnectionError, OSError):
+                        # 空闲连接被 45s 超时回收属正常生命周期，静默丢弃，
+                        # 不打 traceback（客户端下次请求自行重连）
+                        break
                     if stats["calls"] % 50 == 0:
                         n_ = max(1, stats["calls"])
                         log(f"calls={stats['calls']} avg={stats['us']//n_}us "

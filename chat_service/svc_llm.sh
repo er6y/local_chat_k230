@@ -42,6 +42,7 @@ case "$1" in
       fi
       nohup env LD_LIBRARY_PATH=/mnt/data/kpu_llm LD_BIND_NOW=1 $KPU_ENV \
         LLMD_TTS_FIFO=$RUN/tts_in \
+        LLMD_UBATCH=${LLMD_UBATCH:-256} \
         sh /mnt/data/kpu_llm/safe_run.sh $LLOG \
         $LLMD --model $LLM_MODEL $KPU_ARG --ctx-size $LLM_CTX --n-predict $LLM_PREDICT \
           --temp $LLM_TEMP --top-p $LLM_TOP_P --top-k $LLM_TOP_K \

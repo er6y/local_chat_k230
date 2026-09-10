@@ -251,6 +251,10 @@ int main(int argc, char ** argv) {
 
     llama_sampler_chain_params sp = llama_sampler_chain_default_params();
     llama_sampler * smpl = llama_sampler_chain_init(sp);
+    // 重复惩罚：0.6B 低 temp 极易复读整句（实测），penalty_last_n=64 盖住
+    // 生成中的循环半径；RP=1.15 对正常措辞影响有限
+    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+            llama_vocab_n_tokens(vocab), 64, 1.15f, 0.0f, 0.0f));
     if (temp <= 0) {
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
     } else {
