@@ -206,6 +206,7 @@ static void spawn_child(Child &c) {
         prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
         if (getppid() == 1) _exit(1);
         setpgid(0, 0);
+        signal(SIGHUP, SIG_IGN);   // 替代 nohup：chatd 由 ssh 拉起时防会话 HUP 波及
         for (auto &kv : c.env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
         if (!c.log_path.empty() && c.log_path != "/dev/null") {
             int lf = open(c.log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -218,7 +219,7 @@ static void spawn_child(Child &c) {
         std::vector<char *> av;
         for (auto &a : c.argv) av.push_back(const_cast<char *>(a.c_str()));
         av.push_back(nullptr);
-        execv(av[0], av.data());
+        execvp(av[0], av.data());   // execv 不查 PATH，裸 "sh" 会 127
         _exit(127);
     }
     c.pid = pid;

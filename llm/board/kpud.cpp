@@ -91,25 +91,34 @@ static const std::string &dir_for(int S) {
 
 // O_DIRECT 读（页缓存会挤占 CMA，与 Python 版 _read_kmodel_nocache 同理）
 static bool read_kmodel_nocache(const std::string &path, std::vector<uint8_t> &out) {
+    // O_DIRECT 要求 buffer/长度扇区对齐：posix_memalign 对齐缓冲读再搬入
+    // vector（Python 版对齐 mmap 同理）；无 O_DIRECT 支持则普通读
     int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
-    bool aligned = fd >= 0;
-    if (fd < 0) fd = open(path.c_str(), O_RDONLY);   // 某些 fs 不支持 O_DIRECT
+    bool odirect = fd >= 0;
+    if (!odirect) fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) return false;
     off_t len = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
     if (len <= 0) { close(fd); return false; }
-    size_t alen = (aligned ? ((size_t)len + 4095) & ~4095UL : (size_t)len);
-    out.resize(alen);
+    size_t alen = odirect ? (((size_t)len + 4095) & ~4095UL) : (size_t)len;
+    uint8_t *abuf = nullptr;
+    if (odirect && posix_memalign((void **)&abuf, 4096, alen) != 0) {
+        close(fd);
+        return false;
+    }
+    uint8_t *dst = abuf;
+    if (!abuf) { out.resize((size_t)len); dst = out.data(); }
     size_t got = 0;
     while (got < alen) {
-        ssize_t n = read(fd, out.data() + got, alen - got);
+        ssize_t n = read(fd, dst + got, alen - got);
         if (n <= 0) break;
         got += (size_t)n;
     }
     close(fd);
-    if (got < (size_t)len) return false;
-    out.resize((size_t)len);
-    return true;
+    bool ok = got >= (size_t)len;
+    if (ok && abuf) out.assign(abuf, abuf + len);
+    free(abuf);
+    return ok;
 }
 
 static bool load_entry(const std::string &stem, int S, Entry &e) {
@@ -213,6 +222,9 @@ static int recvn(int fd, void *buf, size_t n) {
 struct Stats { long calls = 0, errs = 0; long long us = 0; } g_st;
 
 static void handle_conn(int conn) {
+    // 长连接多请求：llmd 一个连接跑成千上万个 tile（Python 版同语义），
+    // 一请求一关是致命 bug（第二个请求即 EPIPE）
+    while (true) {
     uint32_t magic;
     uint16_t slen;
     if (recvn(conn, &magic, 4) || recvn(conn, &slen, 2)) return;
@@ -251,11 +263,12 @@ static void handle_conn(int conn) {
         }
         if (g_st.calls % 50 == 0)
             logf_("calls=%ld avg=%lldus errs=%ld", g_st.calls, g_st.us / g_st.calls, g_st.errs);
-        return;
+        continue;   // 长连接：本请求完成，读下一个
     }
 err:
     uint32_t hdr[2] = {MAGIC, 1};
     send(conn, hdr, 8, MSG_NOSIGNAL);
+    }
 }
 
 // ---- warm：全量加载到 cap，逐个试跑钉 CMA（Python 版两段式语义）----
@@ -267,8 +280,8 @@ static void warm_all() {
     struct dirent *de;
     while ((de = readdir(d))) {
         std::string n = de->d_name;
-        if (n.size() > 8 && n.substr(n.size() - 8) == ".kmodel")
-            files.push_back(n.substr(0, n.size() - 8));
+        if (n.size() > 7 && n.compare(n.size() - 7, 7, ".kmodel") == 0)
+            files.push_back(n.substr(0, n.size() - 7));
     }
     closedir(d);
     std::sort(files.begin(), files.end());
