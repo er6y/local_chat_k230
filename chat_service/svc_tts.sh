@@ -33,6 +33,7 @@ case "$1" in
     # RTF 10~24，首句延迟几十秒）；同优先级下 decode -13~16%、TTS RTF~0.5-0.7，
     # 两头都保实时（用户拍板：尽量保 decode，TTS RTF<1 即可）
     nohup env PIPER_DP_KPU=$TTS_DP_KPU \
+      PIPER_ENC_SFX=${TTS_ENC_SFX:-} PIPER_FLOW_SFX=${TTS_FLOW_SFX:-} PIPER_DEC_SFX=${TTS_DEC_SFX:-} \
       sh /mnt/data/kpu_llm/safe_run.sh $RLOG \
       $RUNNER --daemon --piper-dir=$TTS_DIR \
       < $RUN/tts_in > /dev/null 2>&1 &
