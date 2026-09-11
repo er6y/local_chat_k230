@@ -9,6 +9,8 @@
 case "$1" in
   start)
     mkdir -p /tmp/chat
+    # 弱信号(-73dBm)下免 PS 睡眠放大尾延迟；实测无害，开机幂等设置
+    iwconfig wlan0 power off 2>/dev/null
     (
       sleep 5
       /mnt/data/kpu_llm/chatd start > /tmp/chat/chatd.log 2>&1

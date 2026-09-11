@@ -84,6 +84,7 @@ struct Child {
 };
 static std::vector<Child> g_children;
 static bool g_shutting_down = false;
+static std::string g_lock_path;               // 单实例锁（/tmp 重启即清）
 
 static long long now_ms() {
     struct timespec ts;
@@ -196,8 +197,12 @@ static void spawn_child(Child &c) {
     if (!c.stdin_path.empty() && c.stdin_path[0] == '/') {
         if (access(c.stdin_path.c_str(), F_OK) != 0)
             mkfifo(c.stdin_path.c_str(), 0666);
-        if (c.hold_fd < 0)   // 写端持握：防 runner/llmd open FIFO 阻塞
-            c.hold_fd = open(c.stdin_path.c_str(), O_WRONLY | O_NONBLOCK);
+        // O_RDWR|O_NONBLOCK：FIFO 写端自持读者，首次 spawn 必然成功。
+        // 曾用 O_WRONLY|O_NONBLOCK——无读者时 ENXIO 直接失败，hold_fd 落空，
+        // 子进程 open(RDONLY) 永久阻塞在 exec 前（ps 里显示为 chatd 副本、
+        // 日志全空、READY 永不来），还诱发双实例互救→双 kpud→CMA 超限爆机
+        if (c.hold_fd < 0)
+            c.hold_fd = open(c.stdin_path.c_str(), O_RDWR | O_NONBLOCK);
     }
     pid_t pid = fork();
     if (pid < 0) { logf_("fork %s fail", c.name); return; }
@@ -267,6 +272,29 @@ int main(int argc, char **argv) {
     std::string cmd = argv[1];
     load_conf(argc > 2 ? argv[2] : "/mnt/data/chat/chat.conf");
     build_children();
+    g_lock_path = cf("RUN", "/tmp/chat") + "/chatd.lock";
+
+    // 单实例锁：防双 chatd。实录惨案：第二个 chatd 的 O_NONBLOCK 开 FIFO
+    // 会把第一个实例卡死的 FIFO 副本解堵，双 kpud 同时 warm → CMA 超限
+    // → GNNE 分配失败 → 整机 panic。锁文件持 pid，陈锁靠存活检查兜底
+    if (cmd == "start" || cmd == "restart") {
+        mkdir(cf("RUN", "/tmp/chat").c_str(), 0755);
+        int lfd = open(g_lock_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (lfd < 0) {
+            int opid = 0;
+            FILE *lf = fopen(g_lock_path.c_str(), "r");
+            if (lf) { if (fscanf(lf, "%d", &opid) != 1) opid = 0; fclose(lf); }
+            if (opid > 0 && opid != getpid() && kill(opid, 0) == 0) {
+                fprintf(stderr, "[chatd] another chatd alive (pid=%d), refuse %s\n",
+                        opid, cmd.c_str());
+                return 3;
+            }
+            lfd = open(g_lock_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (lfd < 0) { fprintf(stderr, "[chatd] lock fail\n"); return 3; }
+        }
+        dprintf(lfd, "%d\n", (int)getpid());
+        // 故意不 close：锁随进程存活，进程死后由存活检查放行新实例
+    }
 
     if (cmd == "status") {
         for (auto &c : g_children)
@@ -277,6 +305,16 @@ int main(int argc, char **argv) {
     }
 
     if (cmd == "stop" || cmd == "restart") {
+        // 跨进程 stop：从锁文件找常驻 chatd 本体并 TERM（子进程 PDEATHSIG 陪葬）。
+        // 旧版只遍历本进程 children 表（跨进程全空）→ stop 形同虚设
+        int opid = 0;
+        FILE *lf = fopen(g_lock_path.c_str(), "r");
+        if (lf) { if (fscanf(lf, "%d", &opid) != 1) opid = 0; fclose(lf); }
+        if (opid > 0 && opid != getpid() && kill(opid, 0) == 0) {
+            logf_("stopping chatd daemon (pid=%d)", opid);
+            kill(opid, SIGTERM);
+            for (int t = 0; t < 100 && kill(opid, 0) == 0; t++) usleep(100000);
+        }
         g_shutting_down = true;
         for (int i = (int)g_children.size() - 1; i >= 0; i--) {
             Child &c = g_children[i];
@@ -307,8 +345,10 @@ int main(int argc, char **argv) {
     // start / restart
     drop_caches();                                // CMA/mmz 大块分配前提（svc 时代教训）
     signal(SIGCHLD, SIG_DFL);
-    signal(SIGTERM, [](int) { _exit(0); });       // chatd 自己收 TERM：立即走人，
-                                                  // 子进程由 PDEATHSIG 兜底
+    signal(SIGTERM, [](int) {
+        unlink(g_lock_path.c_str());
+        _exit(0);           // chatd 自己收 TERM：立即走人，子进程由 PDEATHSIG 兜底
+    });
     for (auto &c : g_children) {
         if (!c.enabled) continue;
         spawn_child(c);
