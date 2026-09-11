@@ -121,11 +121,18 @@ static bool read_kmodel_nocache(const std::string &path, std::vector<uint8_t> &o
     return ok;
 }
 
+static int count_for(int S) {
+    int n = 0;
+    for (auto &k : g_order)
+        if (k.second == S) n++;
+    return n;
+}
+
 static bool load_entry(const std::string &stem, int S, Entry &e) {
-    if (cap_for(S) <= 0 ||
-        (int)g_order.size() >= cap_for(S) * 3) {   // 三档共池（Python 版为各档独立计数，
-        // 简化：总池上限 = 3*单档 cap；svc 全部只开一档，行为等价）
-        // 注：svc_kpu.sh 固定 CAP1=0/CAP4=0，实际只有 S16 一档在用
+    // 每档严格 cap（Python 版同语义）：CMA 是生命线，超 cap 一律拒绝
+    // 走客户端 CPU 回退。懒加载不算免费——l8 以后的请求会逐根吃 CMA，
+    // 总池化的"简化"曾把 CMA 掏到 18MB → GNNE order-10 失败 → 挂死
+    if (cap_for(S) <= 0 || count_for(S) >= cap_for(S)) {
         return false;
     }
     char path[512];
