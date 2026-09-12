@@ -679,6 +679,7 @@ int main(int argc, char *argv[]) {
 
     // mid dp block on CPU ORT (dynamic frame count)
     bool noort = getenv("PIPER_NOORT") != nullptr;  // bisect: skip ORT session
+    bool dpkpu = getenv("PIPER_DP_KPU") != nullptr;
     Ort::Env penv(ORT_LOGGING_LEVEL_ERROR, "piper-pipe");
     Ort::SessionOptions pso;
     pso.SetIntraOpNumThreads(1);
@@ -686,7 +687,10 @@ int main(int argc, char *argv[]) {
     // ops (downstream Mul sees "Missing Input") — run the raw graph.
     pso.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
     std::unique_ptr<Ort::Session> midp;
-    if (!noort || getenv("PIPER_SKIP") == nullptr)
+    // DP_KPU=1 时 mid 不参与运算（dp 走 KPU 四片 + att 三片，见下），FP32
+    // 2.45MB session 纯驻留浪费 —— 内存审计实测后跳过加载；PIPER_MID_ALWAYS 兜底
+    if ((!noort || getenv("PIPER_SKIP") == nullptr) &&
+        !dpkpu && getenv("PIPER_MID_ALWAYS") == nullptr)
       midp = std::make_unique<Ort::Session>(
           penv, (PD + "piper_mid_a.onnx").c_str(), pso);
     Ort::Session *mid = midp.get();
@@ -699,7 +703,6 @@ int main(int argc, char *argv[]) {
     //   post(o2,o1) -> f7(x0=zf[0],post,o1) -> att7(h29,zf,o1) -> c7
     //   f5(x0=(c7*mask)[1],post,o1) -> att5(h29,c7,o1) -> c5
     //   f3(x0=c5[1],post,o1)        -> att3(h29,c5,o1) -> dur
-    bool dpkpu = getenv("PIPER_DP_KPU") != nullptr;
     std::unique_ptr<KpuModel> dp_post_m, dp_f7_m, dp_f5_m, dp_f3_m;
     std::unique_ptr<Ort::Session> att7s, att5s, att3s;
     if (dpkpu) {
