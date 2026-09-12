@@ -5,12 +5,27 @@
 # 重启、stop 有序拆除；log=/tmp/chat/chatd.log，子进程日志各自落在
 # /tmp/chat/{kpu_out,tts_out,llm_out}.log
 # 注意：/tmp 是 tmpfs，开机先 mkdir（boot_trace race 前科）
+# 持久日志（2026-09-12）：/var/log → /tmp 是符号链接，整机日志重启即蒸发。
+# chatd 把自己的流水+子进程崩溃取证（dmesg/内存/进程表快照）写
+# /mnt/data/chat/logs；这里再把 syslogd（kernel/OOM/panic 唯一幸存路径）
+# 指到同一持久目录。S01 跑 syslogd 时 /mnt/data 未必已挂，故在 S99 重启它
+# 一次——此时 chatd 都能读 /mnt/data 的模型，挂载必然完成。
+
+PLOG=/mnt/data/chat/logs
 
 case "$1" in
   start)
     mkdir -p /tmp/chat
     # 弱信号(-73dBm)下免 PS 睡眠放大尾延迟；实测无害，开机幂等设置
     iwconfig wlan0 power off 2>/dev/null
+    # syslogd 持久化（幂等：已在写持久文件就不折腾）。注意 /etc/default
+    # 目录在部分镜像上重启会消失，别依赖它——直接带参数拉 syslogd
+    mkdir -p "$PLOG"
+    ps aux | grep 'syslog[d]' | grep -q 'chat/logs' || {
+      kill "$(cat /var/run/syslogd.pid 2>/dev/null)" 2>/dev/null
+      sleep 0.3
+      syslogd -O "$PLOG/messages" -s 4096 -b 2
+    }
     (
       sleep 5
       /mnt/data/kpu_llm/chatd start > /tmp/chat/chatd.log 2>&1

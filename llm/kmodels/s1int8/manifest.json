@@ -1,0 +1,58 @@
+[
+ {
+  "tag": "l0_q",
+  "IN": 1024,
+  "OUT": 2048,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_q.kmodel",
+  "size": 2175296
+ },
+ {
+  "tag": "l0_k",
+  "IN": 1024,
+  "OUT": 1024,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_k.kmodel",
+  "size": 1095472
+ },
+ {
+  "tag": "l0_v",
+  "IN": 1024,
+  "OUT": 1024,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_v.kmodel",
+  "size": 1095472
+ },
+ {
+  "tag": "l0_o",
+  "IN": 2048,
+  "OUT": 1024,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_o.kmodel",
+  "size": 2168448
+ },
+ {
+  "tag": "l0_gate",
+  "IN": 1024,
+  "OUT": 3072,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_gate.kmodel",
+  "size": 3255104
+ },
+ {
+  "tag": "l0_up",
+  "IN": 1024,
+  "OUT": 3072,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_up.kmodel",
+  "size": 3255104
+ },
+ {
+  "tag": "l0_down",
+  "IN": 3072,
+  "OUT": 1024,
+  "S": 1,
+  "kmodel": "/mnt/d/work/git_dev/k230_prj/local_chat_k230/llm/kmodels/s1int8/l0_down.kmodel",
+  "size": 3220568
+ }
+]

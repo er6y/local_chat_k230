@@ -29,6 +29,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <dirent.h>
+#include <algorithm>
+#include <cerrno>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -37,6 +40,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <sstream>
 
 // ---------- chat.conf 解析（KEY=VALUE，# 注释，容忍引号） ----------
 static std::map<std::string, std::string> g_conf;
@@ -85,6 +89,7 @@ struct Child {
 static std::vector<Child> g_children;
 static bool g_shutting_down = false;
 static std::string g_lock_path;               // 单实例锁（/tmp 重启即清）
+static std::string g_log_dir;                 // 持久日志目录（ext4，重启不丢）
 
 static long long now_ms() {
     struct timespec ts;
@@ -92,14 +97,84 @@ static long long now_ms() {
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+// 双写：stderr（→/tmp/chat/chatd.log，tmpfs）+ $LOG_DIR/chatd.log（持久）。
+// 板上无 RTC，NTP 同步前墙上时间是 Jan 1 00:0x——只当序号看，排序靠文件名/uptime
 static void logf_(const char *fmt, ...) {
+    char msg[1024];
     va_list ap;
-    fprintf(stderr, "[chatd] ");
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    fprintf(stderr, "[chatd] %s\n", msg);
     fflush(stderr);
+    if (g_log_dir.empty()) return;
+    time_t t = time(nullptr);
+    struct tm tmv = *localtime(&t);
+    FILE *f = fopen((g_log_dir + "/chatd.log").c_str(), "a");
+    if (!f) return;
+    fprintf(f, "[%02d-%02d %02d:%02d:%02d] %s\n",
+            tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec, msg);
+    fclose(f);
+}
+
+// ---------- 崩溃取证：子进程异常退出时把现场落盘到持久目录 ----------
+// /var/log → /tmp 是符号链接，整机日志全是 tmpfs，重启即蒸发（2026-09-12
+// 软挂事故取证失败的教训）。这里在"还能动手"的窗口内抢一份现场。
+static void dump_cmd(FILE *f, const char *cmd) {
+    fprintf(f, "\n----- $ %s\n", cmd);
+    fflush(f);
+    FILE *p = popen(cmd, "r");
+    if (!p) { fprintf(f, "(popen fail)\n"); return; }
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, p)) > 0) fwrite(buf, 1, n, f);
+    pclose(p);
+}
+
+static void rotate_forensics() {
+    // 名字 forensics_<epoch>_...，字典序=时间序；只留最近 10 份
+    const size_t KEEP = 10;
+    DIR *d = opendir(g_log_dir.c_str());
+    if (!d) return;
+    std::vector<std::string> names;
+    struct dirent *e;
+    while ((e = readdir(d)) != nullptr)
+        if (!strncmp(e->d_name, "forensics_", 10)) names.push_back(e->d_name);
+    closedir(d);
+    if (names.size() <= KEEP) return;
+    std::sort(names.begin(), names.end());
+    for (size_t i = 0; i + KEEP < names.size(); i++)
+        unlink((g_log_dir + "/" + names[i]).c_str());
+}
+
+static void snapshot_forensics(const Child &c, int rc) {
+    if (g_log_dir.empty()) return;
+    char path[512];
+    snprintf(path, sizeof path, "%s/forensics_%ld_%s_rc%d.log",
+             g_log_dir.c_str(), (long)time(nullptr), c.name, rc);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    time_t t = time(nullptr);
+    fprintf(f, "== %s exited rc=%d @ %s", c.name, rc, ctime(&t));
+    dump_cmd(f, "cat /proc/uptime /proc/loadavg");
+    dump_cmd(f, "dmesg | tail -n 250");
+    dump_cmd(f, "head -8 /proc/meminfo; grep -i cma /proc/meminfo");
+    dump_cmd(f, "ps aux");
+    // 出事子进程自己的输出尾（worker 的 stdout/stderr 全在这，GNNE 崩栈也在）
+    if (!c.log_path.empty() && c.log_path[0] == '/') {
+        fprintf(f, "\n----- tail %s\n", c.log_path.c_str());
+        FILE *lf = fopen(c.log_path.c_str(), "r");
+        if (lf) {
+            static char buf[16384];
+            size_t n = fread(buf, 1, sizeof buf - 1, lf);
+            fclose(lf);
+            buf[n] = 0;
+            size_t cut = n > 6144 ? n - 6144 : 0;   // 只留尾部 6KB，防刷屏吃满
+            fwrite(buf + cut, 1, n - cut, f);
+        }
+    }
+    fclose(f);
+    rotate_forensics();
 }
 
 static void build_children() {
@@ -130,9 +205,19 @@ static void build_children() {
     tts.name = "tts";
     tts.enabled = !RUNNER.empty();
     // safe_run.sh 仅作崩溃标记包装（退出码进日志），chatd 主导重启
-    tts.argv = {"/mnt/data/kpu_llm/safe_run.sh", RUN + "/tts_out.log", RUNNER,
-                "--daemon", "--piper-dir=" + TTS_DIR};
-    tts.env = {{"PIPER_DP_KPU", cf("TTS_DP_KPU", "1")}};
+    tts.argv = {"/mnt/data/kpu_llm/safe_run.sh", RUN + "/tts_out.log", RUNNER};
+    {
+        // TTS_ARGS = runner daemon 的完整旗标表（2026-09-12 matcha 切换）。
+        // 未设置 = 老版 piper 布局（--daemon --piper-dir=<TTS_DIR>）。
+        std::string args = cf("TTS_ARGS", "--daemon --piper-dir=" + TTS_DIR);
+        std::istringstream iss(args);
+        std::string a;
+        while (iss >> a) tts.argv.push_back(a);
+    }
+    // libonnxruntime/xuantie loader 跟着 TTS 放在 TTS_DIR（2026-09-12 起不再
+    // 依赖已删除的 /mnt/data/sherpa/lib）
+    tts.env = {{"PIPER_DP_KPU", cf("TTS_DP_KPU", "1")},
+               {"LD_LIBRARY_PATH", TTS_DIR}};
     tts.stdin_path = RUN + "/tts_in";             // FIFO；写端 chatd 持握
     tts.log_path = RUN + "/tts_out.log";
     tts.ready_pat = "READY";
@@ -194,6 +279,11 @@ static bool ready(const Child &c) {
 }
 
 static void spawn_child(Child &c) {
+    // 防 stale READY：不重启整机只重启 chatd 时，旧日志里残留的 READY/listening
+    // 字样会让 ready() 秒过（实录：llmd 还在加载就报 READY）。spawn 前清空日志，
+    // 门控只认本轮输出。player 的 DONE 计数对齐逻辑见 player.sh
+    if (!c.log_path.empty() && c.log_path[0] == '/')
+        truncate(c.log_path.c_str(), 0);
     if (!c.stdin_path.empty() && c.stdin_path[0] == '/') {
         if (access(c.stdin_path.c_str(), F_OK) != 0)
             mkfifo(c.stdin_path.c_str(), 0666);
@@ -241,6 +331,7 @@ static void reap_and_restart() {
             if (r > 0) {
                 int rc = WIFEXITED(st) ? WEXITSTATUS(st) : -WTERMSIG(st);
                 logf_("%s exited rc=%d", c.name, rc);
+                if (!g_shutting_down) snapshot_forensics(c, rc);
                 c.pid = -1;
                 c.up = false;
                 if (g_shutting_down) continue;
@@ -271,6 +362,10 @@ int main(int argc, char **argv) {
     }
     std::string cmd = argv[1];
     load_conf(argc > 2 ? argv[2] : "/mnt/data/chat/chat.conf");
+    // 持久日志目录（/mnt/data 是 ext4；/var/log → /tmp 全是 tmpfs）。
+    // 建不出来（如数据分区没挂）就退化为纯 tmpfs 行为，不影响保姆本职
+    g_log_dir = cf("LOG_DIR", "/mnt/data/chat/logs");
+    if (mkdir(g_log_dir.c_str(), 0755) != 0 && errno != EEXIST) g_log_dir.clear();
     build_children();
     g_lock_path = cf("RUN", "/tmp/chat") + "/chatd.lock";
 
@@ -294,6 +389,17 @@ int main(int argc, char **argv) {
         }
         dprintf(lfd, "%d\n", (int)getpid());
         // 故意不 close：锁随进程存活，进程死后由存活检查放行新实例
+        // chatd.log 简易轮转 + 开机分隔行（持久日志里按这个对齐每次启动）
+        if (!g_log_dir.empty()) {
+            std::string cl = g_log_dir + "/chatd.log";
+            struct stat st;
+            if (stat(cl.c_str(), &st) == 0 && st.st_size > 2 * 1024 * 1024) {
+                std::string old = cl + ".old";
+                unlink(old.c_str());
+                rename(cl.c_str(), old.c_str());
+            }
+            logf_("==== chatd %s pid=%d ====", cmd.c_str(), (int)getpid());
+        }
     }
 
     if (cmd == "status") {
@@ -359,8 +465,36 @@ int main(int argc, char **argv) {
             logf_("%s %s", c.name, c.up ? "READY" : "NOT-READY (continue)");
     }
     logf_("all children started; entering supervise loop");
+    // llmd 解码卡死看门狗：实录（2026-09-12）排队多轮提问时 llmd KPU 混合
+    // 解码偶发死旋——R 态 100% 单核空转、零输出、不发 kpud 请求（上游
+    // llama.cpp fork 的 kpud 客户端疑因重连后状态残留）。正常一轮 ≤60s，
+    // 提问在途（ask_pending 标志）且 llm_out.log 10 分钟无增长即强杀，
+    // 走既有 forensics+退避重启收尸
+    std::string llm_log = cf("RUN", "/tmp/chat") + "/llm_out.log";
+    std::string pending = cf("RUN", "/tmp/chat") + "/ask_pending";
+    long long llm_size = -1, llm_last_change = now_ms();
     while (true) {
         usleep(200000);
         reap_and_restart();
+        struct stat st;
+        if (stat(llm_log.c_str(), &st) == 0) {
+            long long sz = (long long)st.st_size;
+            if (sz != llm_size) {
+                llm_size = sz;
+                llm_last_change = now_ms();
+            } else if (now_ms() - llm_last_change > 600000 &&
+                       access(pending.c_str(), F_OK) == 0) {
+                for (auto &c : g_children)
+                    if (std::string(c.name) == "llmd" && c.pid > 0 &&
+                        c.up && kill(c.pid, 0) == 0) {
+                        logf_("llmd stall watchdog: pending ask, no output "
+                              "10min, KILL");
+                        kill(c.pid, SIGKILL);
+                        unlink(pending.c_str());
+                        llm_last_change = now_ms();  // 防连环杀（等 reap 走流程）
+                        break;
+                    }
+            }
+        }
     }
 }

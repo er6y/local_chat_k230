@@ -41,6 +41,15 @@
 static const uint32_t MAGIC = 0x4B505547;
 static const char *SOCK_PATH = "/tmp/kpu_gemm.sock";
 
+// mmz_shim.c（同源 C）：kmodel 必须放 CMA —— 该 API 把 GNNE 的取指 pc_s/pc_e
+// 指进这块缓冲，malloc 缓冲(普通 DDR)会锁死内存总线硬挂板（历史复现两次）。
+extern "C" {
+int kd_mpi_sys_mmz_alloc_cached(uint64_t *phy_addr, void **virt_addr,
+                                const char *mmb, const char *zone, uint32_t len);
+int kd_mpi_sys_mmz_free(uint64_t phy_addr, void *virt_addr);
+int kd_mpi_sys_mmz_flush_cache(uint64_t phy, void *virt, uint32_t len);
+}
+
 // ---- 配置（与 Python 版同名 env）----
 static std::string DIR_S16, DIR_S4, DIR_S1;
 static int CAP1, CAP4, CAP16;
@@ -79,6 +88,15 @@ static bool infer_shape(const std::string &stem, int &K, int &OUT) {
 struct Entry {
     nncase::runtime::interpreter *interp = nullptr;
     int K = 0, OUT = 0, S = 16;
+    // 输入 tile 缓冲常驻复用（加载时 zero 一次）。tile 的 [mt, MT) 列是
+    // padding，GEMM 输出逐列独立（空间维不混合），所以每调用重零 1-3MB
+    // 对结果无影响、纯属浪费——实测 down（K=3072,MT=256）一次 3MB。
+    std::vector<float> inbuf;
+    // kmodel 缓冲（mmz/CMA 背板）。load_model(copy=false) 原地引用它：
+    // copy=true 会让 runtime 再拷一份，实测每根 stem 多花一整个文件大小
+    // （3.2MB 文件的 "model" 项实测 6.4MB）——CMA 是生命线，这份拷贝必须省。
+    uint8_t *mbuf = nullptr;
+    uint64_t mbuf_phy = 0;
 };
 static std::map<std::pair<std::string, int>, Entry> g_cache;
 static std::vector<std::pair<std::string, int>> g_order;   // LRU 记账（仅计数用）
@@ -128,6 +146,12 @@ static int count_for(int S) {
     return n;
 }
 
+// CMA 地板：低于此值不再加载新解释器。vendor runtime 的 order:10 分配失败
+// 不查错直接解引用 → SIGSEGV → 整机挂死（历史多次）。宁可少驻留几根走 CPU。
+static const long CMA_FLOOR_KB = 96 * 1024;
+
+static long cma_free_kb();   // 定义见 warm 段之前
+
 static bool load_entry(const std::string &stem, int S, Entry &e) {
     // 每档严格 cap（Python 版同语义）：CMA 是生命线，超 cap 一律拒绝
     // 走客户端 CPU 回退。懒加载不算免费——l8 以后的请求会逐根吃 CMA，
@@ -135,21 +159,51 @@ static bool load_entry(const std::string &stem, int S, Entry &e) {
     if (cap_for(S) <= 0 || count_for(S) >= cap_for(S)) {
         return false;
     }
+    long cmaf = cma_free_kb();
+    if (cmaf >= 0 && cmaf < CMA_FLOOR_KB) {
+        logf_("LOAD REFUSED %s: CmaFree %ld kB < floor %ld kB", stem.c_str(), cmaf,
+              CMA_FLOOR_KB);
+        return false;
+    }
     char path[512];
     snprintf(path, sizeof path, "%s/%s.kmodel", dir_for(S).c_str(), stem.c_str());
+    long cma_before = cma_free_kb();
     std::vector<uint8_t> blob;
     if (!read_kmodel_nocache(path, blob)) {
         logf_("LOAD FAIL %s (read)", path);
         return false;
     }
+    const size_t mlen = blob.size();
+    // 读进 mmz/CMA 缓冲：load_model(copy=false) 原地引用 → 权重只存一份
+    // （copy=true 时 runtime 再拷一份，每 stem 白吃一个文件大小：实测 3.2MB
+    //  的文件 model 项吃 6.4MB）。CMA 是生命线，这份拷贝必须省。
+    uint64_t mb_phy = 0;
+    uint8_t *mb = nullptr;
+    if (kd_mpi_sys_mmz_alloc_cached(&mb_phy, (void **)&mb, NULL, NULL,
+                                    (uint32_t)mlen) == 0 && mb) {
+        memcpy(mb, blob.data(), mlen);
+        kd_mpi_sys_mmz_flush_cache(0, mb, (uint32_t)mlen);
+        std::vector<uint8_t>().swap(blob);   // 立刻还掉临时堆缓冲
+    } else {
+        logf_("LOAD WARN %s: mmz alloc failed (%zu B), fall back to model copy",
+              path, mlen);
+        mb_phy = 0;
+        mb = nullptr;
+    }
+    const uint8_t *msrc = mb ? mb : blob.data();
     auto *it = new nncase::runtime::interpreter();
     auto lr = it->load_model(
-        gsl::span<const gsl::byte>((const gsl::byte *)blob.data(), (gsl::index)blob.size()), true);
+        gsl::span<const gsl::byte>((const gsl::byte *)msrc, (gsl::index)mlen),
+        mb == nullptr);   // mmz 缓冲原地引用，堆缓冲仍需 runtime 自拷
     if (!lr.is_ok()) {
         logf_("LOAD FAIL %s (nncase)", path);
         delete it;
+        if (mb_phy) kd_mpi_sys_mmz_free(mb_phy, mb);
         return false;
     }
+    // CMA 归因：load_model 之后 vs read 之后 = 权重/模型副本；warm 试跑之后
+    // 再涨的 = 运行时激活缓冲（决定 cap 能推多高的关键数）
+    long cma_after_model = cma_free_kb();
     auto ish = it->input_shape(0);
     auto osh = it->output_shape(0);
     if (ish.size() < 4 || osh.size() < 4) {
@@ -161,10 +215,16 @@ static bool load_entry(const std::string &stem, int S, Entry &e) {
     e.K = (int)ish[1];
     e.OUT = (int)osh[1];
     e.S = (int)ish[2];
+    e.inbuf.assign((size_t)e.K * e.S * e.S, 0.0f);   // 常驻输入 tile，只零一次
+    e.mbuf = mb;
+    e.mbuf_phy = mb_phy;
     g_cache[{stem, S}] = e;
     g_order.push_back({stem, S});
-    logf_("loaded %s in=[1,%d,%d,%d] out=[1,%d,%d,%d]",
-          path, e.K, e.S, e.S, e.OUT, e.S, e.S);
+    logf_("loaded %s in=[1,%d,%d,%d] out=[1,%d,%d,%d] file=%zuKB cma %ld->%ld->%ld KB "
+          "(model %ld, io %ld)",
+          path, e.K, e.S, e.S, e.OUT, e.S, e.S, mlen / 1024,
+          cma_before, cma_after_model, cma_free_kb(),
+          cma_before - cma_after_model, cma_after_model - cma_free_kb());
     return true;
 }
 
@@ -177,24 +237,50 @@ static Entry *get_entry(const std::string &stem, int S) {
     return &g_cache[key];
 }
 
+// ---- invoke 分相累计（每 50 次调用随 stats 一起打）----
+struct Phases { long long fold = 0, mk = 0, run = 0, out = 0; } g_ph;
+
 // 一次 invoke：fold → tensor → run → unfold。IO_SCALE 只在无 scale 时代生效
 // （plain int8 部署无 sidecar scale；SQ 时代语义已弃）。
+// 分相计时（g_ph）用于定位每调用 16.5ms 的构成。
+//
+// fold/copy-out 都是 16×16 分块转置：原实现 m 外层 / c 内层，写入步长
+// MT*4=1KB，每个 4B 存都命中不同 cache line（实测 fold 4.5ms / out 2.3ms，
+// 占每调用 43%）。分块后两侧都走满 cache line。
+#define TBLK 16
 static bool invoke(Entry &e, const float *x, int mt, float *y) {
+    using clk = std::chrono::steady_clock;
     const int K = e.K, OUT = e.OUT, S = e.S, MT = S * S;
-    std::vector<float> inp((size_t)K * MT, 0.0f);
-    for (int m = 0; m < mt; m++) {
-        const float *xr = x + (size_t)m * K;
-        for (int c = 0; c < K; c++)
-            inp[(size_t)c * MT + m] = xr[c] * IO_SCALE;
+    auto t0 = clk::now();
+    float *inp = e.inbuf.data();
+    {
+        float tile[TBLK][TBLK];
+        for (int m0 = 0; m0 < mt; m0 += TBLK) {
+            int mi = mt - m0 < TBLK ? mt - m0 : TBLK;
+            for (int c0 = 0; c0 < K; c0 += TBLK) {
+                int ci = K - c0 < TBLK ? K - c0 : TBLK;
+                for (int i = 0; i < mi; i++) {
+                    const float *xr = x + (size_t)(m0 + i) * K + c0;
+                    for (int j = 0; j < ci; j++) tile[i][j] = xr[j] * IO_SCALE;
+                }
+                for (int j = 0; j < ci; j++) {
+                    float *dst = inp + (size_t)(c0 + j) * MT + m0;
+                    for (int i = 0; i < mi; i++) dst[i] = tile[i][j];
+                }
+            }
+        }
     }
+    auto t1 = clk::now();
     auto itr = nncase::runtime::host_runtime_tensor::create(
         nncase::dt_float32, {1, (size_t)K, (size_t)S, (size_t)S},
-        gsl::as_writable_bytes(gsl::make_span(inp)),
+        gsl::as_writable_bytes(gsl::make_span(inp, (size_t)K * MT)),
         true,   // copy=true：M1 验证过的保真路径
         nncase::runtime::host_runtime_tensor::pool_cpu_only);
     if (!itr.is_ok()) return false;
     if (!e.interp->input_tensor(0, itr.unwrap()).is_ok()) return false;
+    auto t2 = clk::now();
     if (!e.interp->run().is_ok()) return false;
+    auto t3 = clk::now();
     auto otr = e.interp->output_tensor(0);
     if (!otr.is_ok()) return false;
     auto th = otr.unwrap().to_host();
@@ -204,11 +290,31 @@ static bool invoke(Entry &e, const float *x, int mt, float *y) {
     if (!omr.is_ok()) return false;
     const float *src = (const float *)omr.unwrap().buffer().data();
     const float inv = 1.0f / IO_SCALE;
-    for (int m = 0; m < mt; m++) {
-        float *yr = y + (size_t)m * OUT;
-        for (int o = 0; o < OUT; o++)
-            yr[o] = src[(size_t)o * MT + m] * inv;
+    {
+        float tile[TBLK][TBLK];
+        for (int m0 = 0; m0 < mt; m0 += TBLK) {
+            int mi = mt - m0 < TBLK ? mt - m0 : TBLK;
+            for (int o0 = 0; o0 < OUT; o0 += TBLK) {
+                int oi = OUT - o0 < TBLK ? OUT - o0 : TBLK;
+                for (int j = 0; j < oi; j++) {
+                    const float *srow = src + (size_t)(o0 + j) * MT + m0;
+                    for (int i = 0; i < mi; i++) tile[i][j] = srow[i] * inv;
+                }
+                for (int i = 0; i < mi; i++) {
+                    float *yr = y + (size_t)(m0 + i) * OUT + o0;
+                    for (int j = 0; j < oi; j++) yr[j] = tile[i][j];
+                }
+            }
+        }
     }
+    auto t4 = clk::now();
+    auto us = [](clk::time_point a, clk::time_point b) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+    };
+    g_ph.fold += us(t0, t1);
+    g_ph.mk += us(t1, t2);
+    g_ph.run += us(t2, t3);
+    g_ph.out += us(t3, t4);
     return true;
 }
 
@@ -228,6 +334,29 @@ static int recvn(int fd, void *buf, size_t n) {
 
 struct Stats { long calls = 0, errs = 0; long long us = 0; } g_st;
 
+// 排空请求体。客户端把 <mt,f32 x[mt*K]> 与头部打在同一次 sendmsg 里，
+// 拒绝时若不读掉，残留字节会被下一请求的 magic 校验吃掉 → 断连 → 客户端
+// 重连风暴（实测：cap50 一轮 prefill 144 次拒绝 → 72 次失步）。K 由 stem
+// 后缀推出；推不出（名字非法）就只能断连——按协议这是唯一安全选择。
+static bool drain_payload(int conn, const char *stem, uint32_t mt) {
+    int K, OUT;
+    if (mt == 0 || mt > 65536 || !infer_shape(stem, K, OUT)) return false;
+    size_t left = (size_t)mt * (size_t)K * 4;
+    char buf[16384];
+    while (left) {
+        size_t n = left < sizeof buf ? left : sizeof buf;
+        ssize_t r = recv(conn, buf, n, 0);
+        if (r <= 0) return false;
+        left -= (size_t)r;
+    }
+    return true;
+}
+
+static bool send_err(int conn, uint32_t code) {
+    uint32_t hdr[2] = {MAGIC, code};
+    return send(conn, hdr, 8, MSG_NOSIGNAL) == 8;
+}
+
 static void handle_conn(int conn) {
     // 长连接多请求：llmd 一个连接跑成千上万个 tile（Python 版同语义），
     // 一请求一关是致命 bug（第二个请求即 EPIPE）
@@ -240,13 +369,13 @@ static void handle_conn(int conn) {
     if (slen >= sizeof stem || recvn(conn, stem, slen)) return;
     uint32_t mt;
     if (recvn(conn, &mt, 4)) return;
-    if (mt == 0 || mt > 65536) { goto err; }
+    if (mt == 0 || mt > 65536) { goto err_drain; }
     {
         int S = (mt == 1) ? 1 : (mt <= 16 ? 4 : 16);
         Entry *e = get_entry(stem, S);
         if (!e) {
             logf_("ERR %s: no kmodel S%d (cap=%d)", stem, S, cap_for(S));
-            goto err;
+            goto err_drain;
         }
         int K = e->K, OUT = e->OUT;
         std::vector<float> x((size_t)mt * K);
@@ -261,24 +390,43 @@ static void handle_conn(int conn) {
         if (!ok) {
             g_st.errs++;
             logf_("ERR %s: invoke failed", stem);
-            goto err;
+            goto err_nodrain;   // 请求体已读，不能再排空（会吃掉下一个请求）
         }
         uint32_t hdr[2] = {MAGIC, 0};
         if (send(conn, hdr, 8, MSG_NOSIGNAL) != 8 ||
             send(conn, y.data(), y.size() * 4, MSG_NOSIGNAL) != (ssize_t)(y.size() * 4)) {
             logf_("send fail (client gone)");
+            return;
         }
         if (g_st.calls % 50 == 0)
-            logf_("calls=%ld avg=%lldus errs=%ld", g_st.calls, g_st.us / g_st.calls, g_st.errs);
+            logf_("calls=%ld avg=%lldus [fold=%lld mk=%lld run=%lld out=%lld] errs=%ld",
+                  g_st.calls, g_st.us / g_st.calls,
+                  g_ph.fold / g_st.calls, g_ph.mk / g_st.calls,
+                  g_ph.run / g_st.calls, g_ph.out / g_st.calls, g_st.errs);
         continue;   // 长连接：本请求完成，读下一个
     }
-err:
-    uint32_t hdr[2] = {MAGIC, 1};
-    send(conn, hdr, 8, MSG_NOSIGNAL);
+err_drain:
+    // code=2：daemon 侧永久拒绝（cap 满 / 无 kmodel）。客户端据此把该 stem
+    // 从 manifest 摘掉，此后直接走 CPU，不再付往返成本。
+    if (!send_err(conn, 2)) return;
+    if (!drain_payload(conn, stem, mt)) return;   // 排不干净就断连，绝不带脏流
+    continue;
+err_nodrain:
+    if (!send_err(conn, 1)) return;
     }
 }
 
-// ---- warm：全量加载到 cap，逐个试跑钉 CMA（Python 版两段式语义）----
+static long cma_free_kb() {
+    FILE *mf = fopen("/proc/meminfo", "r");
+    if (!mf) return -1;
+    char line[256];
+    long v = -1;
+    while (fgets(line, sizeof line, mf))
+        if (!strncmp(line, "CmaFree:", 8)) { v = atol(line + 8); break; }
+    fclose(mf);
+    return v;
+}
+
 static void warm_all() {
     const std::string &dir = DIR_S16;   // svc 只开 S16 档；其他档按需扩展
     DIR *d = opendir(dir.c_str());
@@ -293,29 +441,39 @@ static void warm_all() {
     closedir(d);
     std::sort(files.begin(), files.end());
     int ok = 0, n = std::min<int>((int)files.size(), CAP16);
+    long cma0 = cma_free_kb();
+    logf_("warm start: %d stems, CmaFree %ld kB", n, cma0);
     auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < n; i++) {
+        // CMA 地板：撞了就停手，剩下的 stem 走 CPU 回退（比 vendor 段错误好）
+        long cf = cma_free_kb();
+        if (cf >= 0 && cf < CMA_FLOOR_KB) {
+            logf_("warm STOP at %d/%d: CmaFree %ld kB < floor %ld kB", i, n, cf,
+                  CMA_FLOOR_KB);
+            break;
+        }
         Entry *e = get_entry(files[i], 16);
         if (!e) continue;
         std::vector<float> dummy((size_t)e->K * e->S * e->S, 0.0f);
         std::vector<float> y((size_t)e->OUT * e->S * e->S);
         if (invoke(*e, dummy.data(), e->S * e->S, y.data())) ok++;
         else logf_("WARMRUN FAIL %s", files[i].c_str());
+        // 前 20 根逐根打点：load_model 后 vs 试跑后，分离"模型"与"激活缓冲"
+        if (i < 20)
+            logf_("warm[%d] %s after-run CmaFree %ld kB", i, files[i].c_str(),
+                  cma_free_kb());
+        // 逐段打点：CAP 决策靠这张表（每根 stem 的边际 CMA 成本不同）
+        if ((i + 1) % 10 == 0 || i + 1 == n) {
+            long f = cma_free_kb();
+            logf_("warm %d/%d ok=%d CmaFree %ld kB (delta %ld KB total, %.0f KB/stem)",
+                  i + 1, n, ok, f, cma0 - f,
+                  (double)(cma0 - f) / (double)(i + 1));
+        }
     }
-    char cmaline[512] = {0};
-    FILE *mf = fopen("/proc/meminfo", "r");
-    if (mf) {
-        char line[256];
-        while (fgets(line, sizeof line, mf))
-            if (!strncmp(line, "CmaFree:", 8)) {
-                snprintf(cmaline, sizeof cmaline, " %s", line);
-                break;
-            }
-        fclose(mf);
-    }
-    logf_("warmed %d/%d S16 interpreters in %.1fs.%s", ok, n,
+    logf_("warmed %d/%d S16 interpreters in %.1fs. CmaFree: %ld kB (%.0f KB/stem overall)",
+          ok, n,
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
-          cmaline);
+          cma_free_kb(), (double)(cma0 - cma_free_kb()) / (double)std::max(1, n));
 }
 
 int main() {

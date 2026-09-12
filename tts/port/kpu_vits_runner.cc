@@ -362,6 +362,12 @@ static int RunProbe(const std::string &kmodel_path, const std::string &probe_dir
 int main(int argc, char *argv[]) {
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+  // production gnne defaults: quiet + local-buffer preseed. chatd doesn't set
+  // these, and without them every layer call spams the log (913k lines/30
+  // utterances measured) and the non-preseed alloc path is slower. 0 flag =
+  // never overrides an externally provided value.
+  setenv("GNNE_QUIET", "1", 0);
+  setenv("KPU_LOCAL", "1", 0);
   if (argc >= 2 && std::string(argv[1]) == "--probe") {
     if (argc != 4) {
       fprintf(stderr, "Usage: %s --probe <subgen.kmodel> <probe_dir>\n", argv[0]);
@@ -479,17 +485,17 @@ int main(int argc, char *argv[]) {
             "Usage: %s <text> [options]\n"
             "       %s --daemon [options]   (resident worker, reads stdin)\n"
             "Options:\n"
-            "  --subgen-kmodel=<path> (default: /mnt/data/aishell3/subgen.kmodel)\n"
-            "  --enc-onnx=<path>      (default: /mnt/data/aishell3/enc_dp.onnx)\n"
-            "  --enc-only-onnx=<path> (default: /mnt/data/aishell3/enc.onnx; mu+logs only,\n"
+            "  --subgen-kmodel=<path> (default: /mnt/data/matcha/subgen.kmodel)\n"
+            "  --enc-onnx=<path>      (default: /mnt/data/matcha/enc_dp.onnx)\n"
+            "  --enc-only-onnx=<path> (default: /mnt/data/matcha/enc.onnx; mu+logs only,\n"
             "                         used for the CPU-enc + --dp-kmodel combo)\n"
             "  --dp-kmodel=<path>     (duration predictor on KPU; empty = ORT dp)\n"
-            "  --lexicon=<path>       (default: /mnt/data/aishell3/lexicon.txt)\n"
-            "  --tokens=<path>        (default: /mnt/data/aishell3/tokens.txt)\n"
-            "  --rule-fsts=<path>     (default: /mnt/data/aishell3/phone.fst,/mnt/data/aishell3/date.fst,/mnt/data/aishell3/number.fst)\n"
+            "  --lexicon=<path>       (default: /mnt/data/matcha/lexicon.txt)\n"
+            "  --tokens=<path>        (default: /mnt/data/matcha/tokens.txt)\n"
+            "  --rule-fsts=<path>     (default: /mnt/data/matcha/phone.fst,/mnt/data/matcha/date.fst,/mnt/data/matcha/number.fst)\n"
             "  --sid=<int>            (default: 10)\n"
             "  --speed=<float>        (default: 1.0)\n"
-            "  --output=<path>        (default: /mnt/data/aishell3/tts_kpu_out.wav)\n"
+            "  --output=<path>        (default: /mnt/data/matcha/tts_kpu_out.wav)\n"
             "  --bench                (per-stage rerun timings on first sentence)\n"
             "  --daemon               resident worker: models load ONCE, one\n"
             "                         utterance per stdin line\n"
@@ -502,20 +508,20 @@ int main(int argc, char *argv[]) {
   }
 
   std::string text = daemon_mode ? "" : argv[1];
-  std::string subgen_kmodel = "/mnt/data/aishell3/subgen.kmodel";
-  std::string enc_onnx = "/mnt/data/aishell3/enc_dp.onnx";
-  std::string enc_only_onnx = "/mnt/data/aishell3/enc.onnx";
-  std::string lexicon_path = "/mnt/data/aishell3/lexicon.txt";
-  std::string tokens_path = "/mnt/data/aishell3/tokens.txt";
-  std::string rule_fsts = "/mnt/data/aishell3/phone.fst,/mnt/data/aishell3/date.fst,/mnt/data/aishell3/number.fst";
+  std::string subgen_kmodel = "/mnt/data/matcha/subgen.kmodel";
+  std::string enc_onnx = "/mnt/data/matcha/enc_dp.onnx";
+  std::string enc_only_onnx = "/mnt/data/matcha/enc.onnx";
+  std::string lexicon_path = "/mnt/data/matcha/lexicon.txt";
+  std::string tokens_path = "/mnt/data/matcha/tokens.txt";
+  std::string rule_fsts = "/mnt/data/matcha/phone.fst,/mnt/data/matcha/date.fst,/mnt/data/matcha/number.fst";
   int64_t sid = 10;
   float speed = 1.0f;
   bool bench = false;
   bool use_shl = false;
   std::string enc_kmodel;  // empty = text_encoder stays on CPU via enc_dp.onnx
   std::string dp_kmodel;   // empty = duration predictor via ORT
-  std::string dp_onnx = "/mnt/data/aishell3/dp.onnx";
-  std::string out_wav = "/mnt/data/aishell3/tts_kpu_out.wav";
+  std::string dp_onnx = "/mnt/data/matcha/dp.onnx";
+  std::string out_wav = "/mnt/data/matcha/tts_kpu_out.wav";
   bool compare_enc = false;   // debug: run CPU enc alongside KPU enc, print cos
   std::string dump_logw;      // debug: dump kmodel logw + ORT logw per sentence
   float nsd_override = -1.0f; // debug: override noise_scale_dur (0 = deterministic)
@@ -1903,7 +1909,8 @@ int main(int argc, char *argv[]) {
   // ==== matcha probe: acoustic (CPU) + vocoder ORT vs KPU comparison ====
   // ==== matcha say: text -> (greedy longest-match lexicon) -> acoustic CPU
   // ==== -> KPU vocoder -> 22050Hz wav. Needs --matcha-acoustic/kmodel/lexicon.
-  if (!matcha_say.empty()) {
+  if (!matcha_say.empty() ||
+      (daemon_mode && (!matcha_a_kmodel.empty() || !matcha_acoustic.empty()))) {
     if ((matcha_acoustic.empty() && matcha_a_kmodel.empty()) ||
         (matcha_kmodel.empty() && matcha_vocoder.empty()) ||
         matcha_lexicon.empty() || matcha_tokens.empty()) {
@@ -2017,6 +2024,13 @@ int main(int argc, char *argv[]) {
       printf("[matcha] lexicon words=%zu\n", words_sorted.size());
     }
 
+    float ns = 1.0f, ls = 1.0f;  // sherpa matcha defaults (NOT vits' 0.667!)
+    if (getenv("MATCHA_NS")) ns = atof(getenv("MATCHA_NS"));
+    if (getenv("MATCHA_LS")) ls = atof(getenv("MATCHA_LS"));
+    // one utterance per call — shared by --matcha-say and the --daemon loop
+    // (models/lexicon above stay resident across daemon utterances)
+    auto synth_matcha = [&](const std::string &m_text,
+                            const std::string &m_out) -> bool {
     // split text into sentences at 。！？；，tokenize each via greedy match.
     // sherpa convention (matcha-tts-lexicon.cc + OfflineTtsImpl::AddBlank):
     //   - punctuation maps to tokens (，→, 。→. ！→! ？→? ；→;) appended to the
@@ -2028,7 +2042,7 @@ int main(int argc, char *argv[]) {
     std::vector<std::vector<int64_t>> sents;
     {
       std::vector<int64_t> cur;
-      const std::string &t = matcha_say;
+      const std::string &t = m_text;
       size_t i = 0;
       while (i < t.size()) {
         // try longest lexicon word at i (bytes; entries are whole UTF-8 words)
@@ -2043,16 +2057,25 @@ int main(int argc, char *argv[]) {
           }
         }
         if (!matched) {
-          // punctuation: map to the ASCII token, append, and split the sentence
+          // punctuation: map to the ASCII token, append, and split the sentence.
+          // MATCHA_SPLIT_COMMA=0 keeps comma clauses inside the sentence (the
+          // comma token itself renders as a pause): fewer sentences = fewer
+          // per-sentence ab/wav fixed costs, ~half the ab time on long lines.
           static const std::pair<const char *, const char *> PUNCTS[] = {
               {"。", "."}, {"！", "!"}, {"？", "?"}, {"；", ";"}, {"，", ","},
           };
+          // MATCHA_SPLIT_COMMA=1 restores per-clause splitting (slower speech,
+          // better RTF optics — production default is OFF: the comma token
+          // itself renders as a natural pause)
+          const bool split_comma =
+              getenv("MATCHA_SPLIT_COMMA") != nullptr && atoi(getenv("MATCHA_SPLIT_COMMA")) != 0;
           bool is_punct = false;
           for (const auto &pp : PUNCTS) {
             if (t.compare(i, 3, pp.first) == 0) {
               auto it = tok2id.find(pp.second);
               if (it != tok2id.end()) cur.push_back(it->second);
-              if (!cur.empty()) { sents.push_back(cur); cur.clear(); }
+              const bool hard = !(pp.first == std::string("，") && !split_comma);
+              if (!cur.empty() && hard) { sents.push_back(cur); cur.clear(); }
               i += 3;
               is_punct = true;
               break;
@@ -2071,9 +2094,12 @@ int main(int argc, char *argv[]) {
       }
     }
     printf("[matcha] %zu sentences\n", sents.size());
-
-    float ns = 1.0f, ls = 1.0f;  // sherpa matcha defaults (NOT vits' 0.667!)
-    if (getenv("MATCHA_NS")) ns = atof(getenv("MATCHA_NS"));
+    if (sents.empty()) {
+      // LLM 回复可能带 emoji/纯符号段（实录 😊 段 G2P 为空）。静默跳过：
+      // 不写 DONE（player 找不到文件自然跳过）、不算失败，守护循环继续
+      printf("[matcha] skip: empty/_symbol-only text\n");
+      return true;
+    }
     std::vector<float> audio_out;
     std::vector<float> ort_out;
     double t_aco = 0, t_kpu = 0, t_ab = 0, t_estk = 0;
@@ -2099,8 +2125,12 @@ int main(int argc, char *argv[]) {
         const float *msk = nullptr;     // [1,1,Lp]
         std::vector<float> mm_own, msk_own;
         int64_t Lp = 0;
-        if (kA) {
-          const int64_t XB = 256;
+        // kA is compiled for a fixed token bucket; longer sentences fall
+        // back to the dynamic ab.onnx path when it is loaded.
+        // TB=64 = shipped default bucket (A64 kmodel).
+        const int64_t TB = getenv("MATCHA_TB") ? atoi(getenv("MATCHA_TB")) : 64;
+        if (kA && L <= TB) {
+          const int64_t XB = TB;
           std::vector<int64_t> x_b(XB, 1);
           memcpy(x_b.data(), ids.data(), L * sizeof(int64_t));
           int64_t xlA = L;             // ACTUAL token count (pads masked)
@@ -2129,6 +2159,11 @@ int main(int argc, char *argv[]) {
           mm = mm_own.data();
           msk = msk_own.data();
         } else {
+          if (!aco) {
+            fprintf(stderr, "[matcha] L=%d exceeds MATCHA_TB=%d and no --matcha-acoustic fallback\n",
+                    (int)L, (int)TB);
+            return false;
+          }
           const char *ab_out[] = {"/MatMul_output_0", "/Cast_3_output_0"};
           auto a2 = clk::now();
           auto out = aco->Run(Ort::RunOptions{nullptr}, in, vi.data(), 4, ab_out, 2);
@@ -2146,13 +2181,14 @@ int main(int argc, char *argv[]) {
         mel_full.assign(80 * Lp, 0.0f);
         if (getenv("MATCHA_DUMP_MM")) {
           char p[256];
-          snprintf(p, sizeof(p), "%s.mm.f32", out_wav.c_str());
+          snprintf(p, sizeof(p), "%s.mm.f32", m_out.c_str());
           FILE *f = fopen(p, "ab");
           if (f) { fwrite(mm, 4, Lp * 80, f); fwrite(msk, 4, Lp, f); fclose(f); }
         }
         std::mt19937 rng(0xC0FFEEu + (uint32_t)si);
         std::normal_distribution<float> g(0.f, ns);
-        const int WB = 128;
+        // window width must match the compiled est kmodel's static frame dim
+        const int WB = getenv("MATCHA_WIN") ? atoi(getenv("MATCHA_WIN")) : 128;
         // back-aligned windows: every window with Lp>WB is FULL of real frames
         // (padded tail windows corrupt real frames: GN group stats + attention
         // pad keys; measured cos 0.83 tiled vs 0.999 back-aligned)
@@ -2178,7 +2214,7 @@ int main(int argc, char *argv[]) {
           for (auto &e : x) e = g(rng);
           if (getenv("MATCHA_DUMP_WIN")) {
             char p[256];
-            snprintf(p, sizeof(p), "%s.win%zu_%d", out_wav.c_str(), si, win_idx);
+            snprintf(p, sizeof(p), "%s.win%zu_%d", m_out.c_str(), si, win_idx);
             FILE *wf = fopen(p, "wb");
             if (wf) {
               fwrite(muW.data(), 4, muW.size(), wf);
@@ -2188,15 +2224,18 @@ int main(int argc, char *argv[]) {
             }
           }
           auto a3 = clk::now();
-          for (int k = 0; k < 3; ++k) {
-            float t = k / 3.0f;
+          // Euler steps over t in [0,1); 2 = shipped default (listening+ASR
+          // gated vs 3-step on board, 2026-09-12)
+          const int ODE = getenv("MATCHA_ODE_STEPS") ? atoi(getenv("MATCHA_ODE_STEPS")) : 2;
+          for (int k = 0; k < ODE; ++k) {
+            float t = (float)k / ODE;
             kEst->Run({x.data(), mk.data(), muW.data(), &t}, {v.data()});
-            for (int i = 0; i < 80 * WB; ++i) x[i] += v[i] / 3.0f;
+            for (int i = 0; i < 80 * WB; ++i) x[i] += v[i] / ODE;
           }
           t_estk += ms(a3, clk::now());
           if (getenv("MATCHA_DUMP_WIN")) {
             char p[256];
-            snprintf(p, sizeof(p), "%s.winmel%zu_%d", out_wav.c_str(), si, win_idx);
+            snprintf(p, sizeof(p), "%s.winmel%zu_%d", m_out.c_str(), si, win_idx);
             FILE *wf = fopen(p, "wb");
             if (wf) { fwrite(x.data(), 4, x.size(), wf); fclose(wf); }
           }
@@ -2307,7 +2346,7 @@ int main(int argc, char *argv[]) {
       const float *mp = mel_full.data();
       if (getenv("MATCHA_DUMP_MEL")) {
         char p[256];
-        snprintf(p, sizeof(p), "%s.mel.f32", out_wav.c_str());
+        snprintf(p, sizeof(p), "%s.mel.f32", m_out.c_str());
         FILE *f = fopen(p, "ab");
         if (f) { fwrite(mp, 4, 80 * Lm, f); fclose(f); }
       }
@@ -2326,10 +2365,10 @@ int main(int argc, char *argv[]) {
         const float *vp = vres[0].GetTensorData<float>();
         wav.assign(vp, vp + n_el);
       } else {
-        // KPU vocoder in 128-frame chunks (the b512 bucket's tiled
+        // KPU vocoder in fixed-frame chunks (the b512 bucket's tiled
         // ConvTranspose kernels are broken on K230; single-tile b128 is
         // verified cos 0.96). Chunks crossfaded by 1 frame (256 samples).
-        const int64_t CH = 128;
+        const int64_t CH = getenv("MATCHA_VOC_CHUNK") ? atoi(getenv("MATCHA_VOC_CHUNK")) : 128;
         const size_t XF = 256;  // crossfade samples (1 hop)
         std::vector<float> chunk(kvoc->output_bytes(0) / sizeof(float));
         int64_t produced = 0;
@@ -2397,9 +2436,9 @@ int main(int argc, char *argv[]) {
     }
     {
       auto a = clk::now();
-      sherpa_onnx::WriteWave(out_wav, 22050, audio_out.data(), audio_out.size());
+      sherpa_onnx::WriteWave(m_out, 22050, audio_out.data(), audio_out.size());
       if (!ort_out.empty()) {
-        std::string ortp = out_wav + ".ort.wav";
+        std::string ortp = m_out + ".ort.wav";
         sherpa_onnx::WriteWave(ortp, 22050, ort_out.data(), ort_out.size());
         printf("[matcha] ort ref wav: %s\n", ortp.c_str());
       }
@@ -2408,11 +2447,51 @@ int main(int argc, char *argv[]) {
     const double audio_s = (double)audio_out.size() / 22050.0;
     if (est_mode)
       printf("[matcha] DONE %s audio=%.2fs aco=%.0fms (ab=%.0fms estk=%.0fms) kpu=%.0fms RTF=%.3f\n",
-             out_wav.c_str(), audio_s, t_aco, t_ab, t_estk, t_kpu,
+             m_out.c_str(), audio_s, t_aco, t_ab, t_estk, t_kpu,
              (t_aco + t_kpu) / 1000.0 / audio_s);
     else
       printf("[matcha] DONE %s audio=%.2fs aco=%.0fms kpu=%.0fms RTF=%.3f\n",
-             out_wav.c_str(), audio_s, t_aco, t_kpu, (t_aco + t_kpu) / 1000.0 / audio_s);
+             m_out.c_str(), audio_s, t_aco, t_kpu, (t_aco + t_kpu) / 1000.0 / audio_s);
+    if (daemon_mode) {
+      // svc/chatd protocol line — same format as the piper daemon
+      printf("DONE %s %.2f %.3f\n", m_out.c_str(), audio_s,
+             audio_s > 0 ? (t_aco + t_kpu) / 1000.0 / audio_s : 9.999);
+      fflush(stdout);
+    }
+    return true;
+    };
+
+    if (daemon_mode) {
+      printf("READY\n");
+      fflush(stdout);
+      std::string dline;
+      while (std::getline(std::cin, dline)) {
+        if (dline.empty() || dline[0] == '#') continue;
+        if (dline == "QUIT") break;
+        const size_t q1 = dline.find('\t');
+        const size_t q2 =
+            (q1 == std::string::npos) ? std::string::npos : dline.find('\t', q1 + 1);
+        const size_t q3 =
+            (q2 == std::string::npos) ? std::string::npos : dline.find('\t', q2 + 1);
+        if (q3 == std::string::npos) {
+          printf("ERROR protocol: expected <wav>\t<sid>\t<speed>\t<text>\n");
+          fflush(stdout);
+          continue;
+        }
+        const std::string wav_req = dline.substr(0, q1);
+        const std::string spd_req = dline.substr(q2 + 1, q3 - q2 - 1);
+        try {
+          float spd = std::stof(spd_req);
+          ls = (spd > 0) ? (1.0f / spd) : 1.0f;
+        } catch (...) { ls = 1.0f; }
+        if (!synth_matcha(dline.substr(q3 + 1), wav_req))
+          printf("ERROR synth %s\n", wav_req.c_str());
+        fflush(stdout);
+      }
+      mmz_shim_release_all();
+      return 0;
+    }
+    if (!synth_matcha(matcha_say, out_wav)) return 1;
     mmz_shim_release_all();
     _exit(0);
   }

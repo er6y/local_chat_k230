@@ -18,6 +18,9 @@ while :; do
       rm -f "$wav"
     fi
     n=$((n + 1))
+  elif [ "$now" -lt "$n" ]; then
+    # tts 崩溃重启后 chatd 会清空 tts_out.log（防 stale READY），计数对齐回去
+    n=$now
   else
     sleep 0.3
   fi

@@ -5,10 +5,12 @@ OUT=/tmp/chat/ask_out.txt
 [ -z "$Q" ] && { echo '用法: sh /mnt/data/chat/ask.sh 你的问题'; exit 1; }
 LB=$(grep -c '^DONE' /tmp/chat/llm_out.log 2>/dev/null); [ -z "$LB" ] && LB=0
 printf '%s\t96\t%s\n' "$OUT" "$Q" > /tmp/chat/llm_in
+: > /tmp/chat/ask_pending   # 在途标志：chatd 的 llmd 卡死看门狗据此判定
 echo '(思考中，语音边生成边播出...)'; n=0
 while [ $n -lt 240 ]; do
   now=$(grep -c '^DONE' /tmp/chat/llm_out.log 2>/dev/null); [ -z "$now" ] && now=0
   [ "$now" -gt "$LB" ] && break
   sleep 1; n=$((n+1))
 done
+rm -f /tmp/chat/ask_pending  # 正常/超时都清掉，防看门狗误杀空闲 llmd
 echo '回答:'; cat $OUT 2>/dev/null; echo
