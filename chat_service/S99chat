@@ -15,6 +15,11 @@ case "$1" in
     echo 3 > /proc/sys/kernel/printk 2>/dev/null
     # 顺序大文件读加速（GGUF/mmap fault-around 走 readahead）
     echo 1024 > /sys/block/mmcblk0/queue/read_ahead_kb 2>/dev/null
+    # KPU NOC QoS 解锁（2026-09-24：官方 run.sh 同款三条 devmem）。
+    # 实测 decode 375→268ms(-28%)；重启失效，开机必打。详见 llm/board/static/noc_poke.sh
+    devmem 0x91103028 32 0x30002 2>/dev/null
+    devmem 0x91301d0c 32 0 2>/dev/null
+    devmem 0x91301d8c 32 0 2>/dev/null
     mkdir -p "$PLOG"
     ps aux | grep "syslog[d]" | grep -q "chat/logs" || {
       kill "$(cat /var/run/syslogd.pid 2>/dev/null)" 2>/dev/null
