@@ -37,3 +37,11 @@ riscv64-unknown-linux-gnu-g++ -O2 -std=c++17 -o /tmp/bench_kv6 bench_kv6.cc \
   terminate（已修：边界检查+跳过）
 - 传 config.json **文件路径**不是目录（传目录 → json type_error 306）
 - max_new_tokens 写 config.json（命令行那份不生效）
+
+## 与 surgery 的区别 & fork 归属
+
+- surgery 改**模型**（ONNX 本体）；cxx 改**宿主运行时**（demo C++ 代码/计时器）。
+  都不进 nncase 编译器 fork。
+- `qwen_chat_overlay/` 的归宿 = **k230_ai_assistant 官方仓的 fork**（qwen_chat 所在仓），
+  补丁以提交维护；bench_kv6.cc 也可作为工具提进同一 fork。
+  待 fork 地址后执行：clone → 覆盖 overlay → commit → push。

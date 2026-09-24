@@ -1,7 +1,10 @@
 # LLM — K230 nncase kmodel 路线（主线）
 
 Qwen2.5-0.5B-24L 自编译 kmodel 在 K230 上的 decode 极速线。
-llama.cpp 路线已退役（`legacy/` 仅存档，不再维护）。
+llama.cpp 路线已退役删除。
+
+**编译器 fork 在上一级：`../nncase/`（modules/Nncase.Modules.K230，官方默认路径，
+TTS 线共用）。fork 官方仓后以分支形式维护。**
 
 ## 现状（2026-09-24）
 
@@ -21,7 +24,6 @@ llama.cpp 路线已退役（`legacy/` 仅存档，不再维护）。
 
 | 目录 | 内容 | 运行地 |
 |---|---|---|
-| `compiler/` | **nncase K230 后端 fork（proj82）**：闭源插件反编译重建源码，QuantToCpu 补丁已入 | 服务器 |
 | `surgery/` | ONNX 图手术：lm_head 切块、GQA fold、输出堆叠（编译器搞不定的结构改动） | 本机/服务器 |
 | `compile/` | 全模型编译脚本 + 服务器环境配方 + 分块推板 | 128 服务器 |
 | `board/` | 生产基础设施（chatd/kpud） | 板 |
@@ -29,7 +31,6 @@ llama.cpp 路线已退役（`legacy/` 仅存档，不再维护）。
 | `tools/` | GNNE ISA 逆向（spec/编码器/解码器）、kmodel 格式解析 | 通用 |
 | `cxx/` | C++ 计时器 bench_kv6 + qwen_chat 补丁 overlay | 本机 WSL 交叉编译 |
 | `docs/` | 对齐规格书、优化空间分析、已知问题清单 | — |
-| `legacy/` | llama.cpp 线遗物（build/eval/kmodels/llmd），只读存档 | — |
 
 ## 快速上手（编译一版全模型）
 
@@ -46,3 +47,12 @@ python3 board/static/bd_kv6q2cpu.py /mnt/data/static/llm_kv6_stacked.kmodel 20
 ```
 
 环境配方详见 `compile/README.md`。
+
+## 代码归属速查（哪个改动该进哪个仓）
+
+| 改动类型 | 归属 | 现状 |
+|---|---|---|
+| 编译器 pass/发射/量化规则 | `../nncase/modules/Nncase.Modules.K230`（fork kendryte/nncase） | ✅ 已入库，待 fork URL 后推远端 |
+| 模型图结构（改 ONNX 本体） | `surgery/`（部分将来可编译器化，见其 README） | ✅ |
+| 宿主 C++（demo/计时器） | `cxx/`（qwen_chat 补丁应上 ai_assistant fork） | overlay 就绪，待 fork URL |
+| 板上测量/取证 | `board/static/` + `tools/` | ✅ |
