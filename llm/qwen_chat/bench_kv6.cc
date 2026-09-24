@@ -56,8 +56,8 @@ int main(int argc, char **argv) {
         inputs.push_back(mk_tensor<float>({1, 1, 896}, true, 1.0f));
         inputs.push_back(mk_tensor<float>({1, 1, 1, 1}, false, 0.f));
         inputs.push_back(mk_tensor<int32_t>({1, 1}, false, 0.f));
-        int H = argc > 3 ? atoi(argv[3]) : 255;
-        inputs.push_back(mk_tensor<float>({24, 2, 1, H, 2, 64}, true, 0.66f));
+        // qwen_chat-exact contract: past = llm_config key_value_shape (zero dim = runtime-managed KV)
+        inputs.push_back(mk_tensor<float>({2, 1, 0, 2, 64}, true, 0.66f));
     } else {
         inputs.push_back(mk_tensor<float>({1, 1, 896}, true, 1.0f));
         inputs.push_back(mk_tensor<float>({1, 1, 1, 33}, false, 0.f));
