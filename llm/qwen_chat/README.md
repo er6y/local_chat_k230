@@ -40,6 +40,12 @@ libnncase.rt_modules.k230.a、libfunctional_k230.a、libmmz.a。
 
 ## 交叉编译（本机 WSL1 Ubuntu-22.04，root）
 
+**已从本树实机编译验证（2026-09-24）**：cmake configure+build rc=0，
+产物 `build_riscv/qwen_chat` 6,985,848 B（md5 313b4272）。与旧工作树
+~/qwen_chat_dbg 的参照二进制（88f8633f，板上 qwen_chat_remap 同源）仅差 480B——
+差异全部来自工作树 cli_demo.cpp 里的**临时调试插桩**（backtrace/operator-new
+dump，bad_alloc 破案用的），有意不 vendored；src/include 两目录逐字节一致。
+
 ```bash
 cd /root/qwen_chat_dbg && export PATH=/root/xuantie/bin:$PATH
 # gsl 头要落位：mkdir -p /tmp/binc/gsl && cp 3rd_party/gsl/gsl-lite.hpp /tmp/binc/gsl/
