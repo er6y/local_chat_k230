@@ -100,9 +100,9 @@ do_bench() {
   scp -q -o BatchMode=yes "$L/board/static/bd_kv6q2cpu.py" $BOARD:/mnt/data/static/ || die "推 bd_kv6q2cpu.py 失败"
   ssh -o BatchMode=yes $BOARD "sync; echo 3 > /proc/sys/vm/drop_caches; ln -sf /dev/k230-gnne /dev/gnne_device" || die "板端准备失败"
   ssh -o BatchMode=yes $BOARD "sh /mnt/data/static/noc_poke.sh" || die "noc_poke 失败"
-  CMA=$(ssh -o BatchMode=yes $BOARD "grep CmaFree /proc/meminfo" | awk '{print \$2}')
+  CMA=$(ssh -o BatchMode=yes $BOARD "grep CmaFree /proc/meminfo" | awk '{print $2}')
   echo "CmaFree=${CMA}kB"
-  [ "${CMA:-0}" -ge 550000 ] || { sleep 15; CMA=$(ssh -o BatchMode=yes $BOARD "grep CmaFree /proc/meminfo" | awk '{print \$2}'); }
+  [ "${CMA:-0}" -ge 550000 ] || { sleep 15; CMA=$(ssh -o BatchMode=yes $BOARD "grep CmaFree /proc/meminfo" | awk '{print $2}'); }
   [ "${CMA:-0}" -ge 550000 ] || die "CmaFree 只有 ${CMA}kB（<550MB），窗口不对，重跑 bench"
   ssh -o BatchMode=yes $BOARD "python3 /mnt/data/static/bd_kv6q2cpu.py $BKM 20" > /tmp/oneclick_bd_$$.txt || die "bd_kv6q2cpu 失败"
   cat /tmp/oneclick_bd_$$.txt
