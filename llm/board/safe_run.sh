@@ -1,28 +1,14 @@
 #!/bin/sh
-# safe_run.sh LOG CMD... -- watchdog-protected execution (v3):
-# a feeder subshell owns /dev/watchdog for the whole run: opens the device,
-# feeds every 8s while CMD runs, magic-closes (V) when /tmp/wdt_off appears
-# or the parent dies. Open failure is NON-FATAL (run proceeds unprotected).
+# safe_run.sh LOG CMD... -- v4 (2026-09-14): WDT feeder REMOVED.
+# Root cause proven: vendor /dev/watchdog keeps counting after unclean
+# feeder close -> hardware bite ~30-60s later = SILENT SoC reset
+# (verified: kill -9 feeder -> reset 54s later, serial shows zero kernel output).
+# Hang protection now lives in chatd (180s llmd watchdog, targeted kill only).
 LOG="$1"; shift
-rm -f /tmp/wdt_off
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null   # reclaim CMA borrowed by page cache
-echo V > /dev/watchdog 2>/dev/null              # plain command: disarm a stale claim if any
-( echo "[safe_run] feeder spawn" >> "$LOG"
-  exec 3<>/dev/watchdog 2>/dev/null             # busy -> subshell exits, unprotected run
-  echo "[safe_run] wdt armed" >> "$LOG"
-  while [ ! -e /tmp/wdt_off ] && kill -0 $PPID 2>/dev/null; do
-    echo x >&3 2>/dev/null || exit 0
-    sleep 8
-  done
-  echo V >&3 2>/dev/null
-  exec 3>&-
-) &
-FEED=$!
+# drop_caches 撤销(2026-09-15):KPU=0 后页缓存无 CMA 冲突,AUTO 模式
+# 靠它做 llmd 热重启(31s→~6s);kvr 的 CMA 需求内核会按需驱逐页缓存
+echo 0 > /proc/sys/vm/drop_caches 2>/dev/null
 "$@" >> "$LOG" 2>&1
 RC=$?
-touch /tmp/wdt_off
-sleep 9                 # feeder wakes from its <=8s sleep, disarms and closes
-wait $FEED 2>/dev/null
-echo "[safe_run] done rc=$RC" >> "$LOG"
 sync
 exit $RC

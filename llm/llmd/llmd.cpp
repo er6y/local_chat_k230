@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <csignal>
 #include <algorithm>
 
 using clk = std::chrono::steady_clock;
@@ -34,11 +35,45 @@ using clk = std::chrono::steady_clock;
 // 打开：TTS 链没起时丢弃该句并告警，绝不阻塞 decode。行协议与 svc_tts 的
 // runner 一致：<wav>\t<sid>\t<speed>\t<text>；播放在独立的 player 守护里
 // 按 DONE 出现顺序进行（合成与解码重叠，播放按句序）。
+// ---- TTS 文本规整（2026-09-14）--------------------------------------
+// matcha 前端词库（lexicon_poly.txt 67910 条）零 ASCII 映射：数字和英文
+// 字母送进去直接不出声。提示词约束对 0.6B 不可靠（实测照吐阿拉伯数字），
+// 故在 TTS 副本上规整：数字→汉字、句中小数点→"点"、字母→普通话近音字。
+// 只改送 TTS 的文本，屏幕/ask_out 保留模型原文。
+static std::string tts_normalize(const std::string & in) {
+    static const char * dig[] = {"零","一","二","三","四","五","六","七","八","九"};
+    static const char * let[26] = {
+        "诶","比","西","迪","衣","艾弗","吉","艾尺","艾","杰","开","艾勒",
+        "艾马","恩","欧","批","吉吾","啊儿","艾丝","提","由","维","达布流",
+        "艾克斯","歪","贼"};
+    std::string o;
+    o.reserve(in.size() * 3 + 8);
+    size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = (unsigned char)in[i];
+        if (c >= '0' && c <= '9') {
+            o += dig[c - '0'];
+            // 两侧都是数字的小数点读"点"："3.5"→三点五
+            if (i + 2 < in.size() && in[i+1] == '.' &&
+                in[i+2] >= '0' && in[i+2] <= '9') { o += "点"; i += 2; }
+            i++;
+        } else if (c >= 'a' && c <= 'z') {
+            o += let[c - 'a']; i++;
+        } else if (c >= 'A' && c <= 'Z') {
+            o += let[c - 'A']; i++;
+        } else {
+            o += in[i]; i++;   // UTF-8 多字节按字节原样续上；'%/等符号 TTS 前端自然忽略
+        }
+    }
+    return o;
+}
+
 static int g_tts_seq = 0;
+static bool g_tts_mute = false;   // 预热轮（out 路径含 /warmup）：只暖 KV，不出声
 static void tts_send_sentence(const std::string & s) {
     const char * fifo = getenv("LLMD_TTS_FIFO");
-    if (!fifo || s.empty()) return;
-    std::string line = s;
+    if (!fifo || s.empty() || g_tts_mute) return;
+    std::string line = tts_normalize(s);
     for (auto & c : line) if (c == '\n' || c == '\t' || c == '\r') c = ' ';
     while (line.compare(0, 3, "…") == 0) line.erase(0, 3);   // 省略号被切开后的残头
     if (line.find_first_not_of(' ') == std::string::npos) return;
@@ -187,7 +222,21 @@ static std::string render_base(const std::string & s) {
     return (gp == std::string::npos) ? s : s.substr(0, gp);
 }
 
+// SIGSEGV 现场取证（2026-09-13 KPU local 排查）：打印 C++ 调用链到 stderr，
+// 配合 addr2line 用。常驻无副作用；-rdynamic 链接时符号名可读。
+#include <execinfo.h>
+static void llmd_segv_bt(int sig) {
+    void * bt[48];
+    int n = backtrace(bt, 48);
+    fprintf(stderr, "\n[llmd] SIGNAL %d backtrace (%d frames):\n", sig, n);
+    fflush(stderr);
+    backtrace_symbols_fd(bt, n, 2);
+    _exit(139);
+}
+
 int main(int argc, char ** argv) {
+    signal(SIGSEGV, llmd_segv_bt);
+    signal(SIGBUS, llmd_segv_bt);
     std::string model_path;
     // 精简版(38tok,省33% prefill)实测会让 0.6B 跑出 think 外泄+复读——
     // 指令密度是这个尺寸模型的"行为锚"，勿瘦（2026-09-10 A/B 定案）
@@ -214,7 +263,13 @@ int main(int argc, char ** argv) {
     }
     if (model_path.empty()) { fprintf(stderr, "[llmd] --model required\n"); return 1; }
 
-    ggml_backend_load_all();
+    // 2026-09-13：**禁用 ggml_backend_load_all**。llama-cli 从不调它（grep
+    // 证实），而它会扫描目录 dlopen "libggml-*" 文件——板上目录里有多份
+    // libggml-cpu 旧拷贝（.bak），同名不同 inode 的 dlopen = nncase 运行时
+    // 第二实例，弱符号（vtable/typeinfo）跨副本错绑 → create() 对象头被踩
+    // （llmd-local 必崩的头号嫌疑）。CPU-only 板上唯一后端是静态注册的 CPU
+    // 后端，跳过无任何功能损失。
+    // ggml_backend_load_all();
     // --kpu 点亮 KPU prefill 劫持。生产链路 = daemon 模式（KPU_DAEMON=1，
     // 客户端不持 kmodel、不占 CMA）+ KPU_HYBRID=1（decode M<32 留 CPU RVV，
     // prefill M>=32 上 KPU）。劫持失败已带 bool 返回 + CPU 回退，不会走
@@ -232,18 +287,34 @@ int main(int argc, char ** argv) {
     // LLMD_UBATCH 环境变量覆盖做 A/B）。
     params.n_ubatch = 64;
     if (const char * u = getenv("LLMD_UBATCH")) params.n_ubatch = atoi(u);
-    // 权重必须零页缓存：DIRECT_IO（fork 已支持，O_DIRECT 私有缓冲）。
-    // 默认 AUTO=mmap：解码缺页把 gguf 页缓存(~456MB)在 zone/CMA 间倒腾
-    // （CmaFree 锯齿 112~224MB），谷底碎片化咬死 KPU daemon 的 GNNE 连续
-    // 分配（vendor 不查错直接段错误）；NONE 模式加载时 456 anon + 456 页
-    // 缓存双持 912MB 会 OOM。DIO 峰值=456MB，加载后文件永不再读。
+    // 权重加载模式（LLMD_LOAD_MODE=DIO|AUTO|NONE，默认 DIO）：
+    // DIO（O_DIRECT 私有缓冲，零页缓存，峰值 ~456MB anon）——daemon 时代
+    // 的定案（页缓存在 zone/CMA 间倒腾咬死 GNNE 连续分配）。
+    // 2026-09-13 复评（local 模式 + KPU stems in CMA）：DIO 的 688MB 匿名
+    // 权重把非 CMA 侧（~870MB 可用）塞满，内核被迫把 ~100MB 不可移动的
+    // 匿名页钉进 CMA 区域——永久碎片化 + cma_alloc 冻结的机制根源。
+    // AUTO=mmap 把权重还给可驱逐页缓存：DMA 需要 CMA 时内核自动腾挪，
+    // 非匿名需求降到 ~350MB。代价：CMA 被 stems 挤到极限时 decode 权重
+    // 可能回源 eMMC（以 decode t/s 是否塌方为准）。NONE 会双持 912MB
+    // 直接 OOM，仍保留仅作对照。
     params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO;
+    if (const char * m = getenv("LLMD_LOAD_MODE")) {
+        if (!strcmp(m, "AUTO")) params.load_mode = LLAMA_LOAD_MODE_AUTO;
+        else if (!strcmp(m, "NONE")) params.load_mode = LLAMA_LOAD_MODE_NONE;
+    }
     params.cpuparams.n_threads = 1;
     params.cpuparams_batch.n_threads = 1;
     params.kpu = use_kpu;
+    // 启动分期计时：3.5min 的加载黑盒拆开看（2026-09-14 用户反馈开机久）
+    auto boot_ms = []() {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    };
+    long long t_load0 = boot_ms();
     common_init_result_ptr ir = common_init_from_params(params);
     llama_model * model = ir ? ir->model() : nullptr;
     if (!model) { fprintf(stderr, "[llmd] model load failed\n"); return 1; }
+    fprintf(stderr, "[llmd] t=%lldms: model+ctx loaded (common_init)\n", boot_ms() - t_load0);
     const llama_vocab * vocab = llama_model_get_vocab(model);
     llama_context * ctx = ir->context();
     if (!ctx) { fprintf(stderr, "[llmd] context init failed\n"); return 1; }
@@ -291,6 +362,7 @@ int main(int argc, char ** argv) {
     turn_start.push_back(0);             // [0] = system 段起点
     int n_session = 0;
 
+    fprintf(stderr, "[llmd] t=%lldms: sampler/templates done, serving\n", boot_ms() - t_load0);
     printf("READY\n");
     fflush(stdout);
 
@@ -319,6 +391,9 @@ int main(int argc, char ** argv) {
         if (n_predict <= 0) n_predict = n_predict_def;
         std::string user = dline.substr(q2 + 1);
         if (user.empty() || out_path.empty()) continue;
+        // 预热轮识别（chatd 开机 warmup 写 /tmp/chat/warmup_out.txt）：
+        // 该轮照常 prefill 垫 KV，但静音 TTS——用户听不到开机自语
+        g_tts_mute = out_path.find("/warmup") != std::string::npos;
 
         // 滑窗淘汰一步：从 KV 中间删除最老一轮的 token 段并压实位置
         // （seq_rm + seq_add），历史同步删除。返回 false = 没得淘汰了。
@@ -435,6 +510,10 @@ int main(int argc, char ** argv) {
 
         // 全量/前缀路径：首 turn、增量校验失败、或增量后仍超限时兜底。
         // 前缀断裂也不再清空整窗：从断点续算，损失只限最后一轮的长度。
+        // 心跳：看门狗（chatd 3min 无增长即杀）与现场定位靠它区分卡在
+        // prefill 还是 decode（2026-09-14 实录：静默 10min 只能盲杀）
+        fprintf(stderr, "[llmd] hb: turn %d start, prompt %zu tok\n",
+                n_session, r.tok.size());
         if (!appended && !failed) {
             size_t mx = std::min(kv_tokens.size(), r.tok.size());
             while (L < mx && kv_tokens[L] == r.tok[L]) L++;
@@ -506,6 +585,9 @@ int main(int argc, char ** argv) {
             }
             kv_tokens.push_back(id);
             n_gen++;
+            if (n_gen % 16 == 0)
+                fprintf(stderr, "[llmd] hb: turn %d decode %d tok\n",
+                        n_session, n_gen);
             if (n_gen == 1) {
                 // 首包必须尽快可见（demo 在轮询文件大小）
                 fflush(to.f);

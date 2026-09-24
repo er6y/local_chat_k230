@@ -27,6 +27,15 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <sys/mman.h>
+// vendor GNNE 硬件初始化（k230 runtime 模块内实现）；gnne_regs 全局见 main
+extern "C" void gnne_init(void);
+// k230 runtime 的寄存器窗口全局（gnne.c.o，whole-archive 带入）。
+// 本镜像 /dev/k230-gnne 无 mmap 回调 → runtime 自映射失败留 NULL → 所有
+// 子图静默空转。这里直接 extern 引用（静态链接，dlsym 对可执行文件无效）。
+extern "C" void *gnne_regs;
 #include <dirent.h>
 #include <cstdarg>
 #include <cstdio>
@@ -88,10 +97,15 @@ static bool infer_shape(const std::string &stem, int &K, int &OUT) {
 struct Entry {
     nncase::runtime::interpreter *interp = nullptr;
     int K = 0, OUT = 0, S = 16;
-    // 输入 tile 缓冲常驻复用（加载时 zero 一次）。tile 的 [mt, MT) 列是
-    // padding，GEMM 输出逐列独立（空间维不混合），所以每调用重零 1-3MB
-    // 对结果无影响、纯属浪费——实测 down（K=3072,MT=256）一次 3MB。
+    // 输入 tile 缓冲常驻复用（加载时 zero 一次），**但必须维持不变量：
+    // 列 [mt, MT) 恒为 0**。kmodel 的输入量化是整块 per-tensor 的，尾巴里
+    // 的非零陈旧数据会抬高整块动态范围，把真实行压到 0 —— 实测 M=57 连续调用
+    // （尾巴一直是 warm 留下的 0）输出正确，一旦转到 M=18，列 [18,57) 还留着
+    // 上一张图 l0_q 的真实激活，输出立刻变乱码。
+    // 早先"空间维不混合所以 padding 无所谓"的判断只对输出行有效，对输入
+    // 量化范围无效。last_mt 记录上次写入的列数，只在变小的时候补零。
     std::vector<float> inbuf;
+    int last_mt = 0;   // 已写入（或已确认清零）的列数
     // kmodel 缓冲（mmz/CMA 背板）。load_model(copy=false) 原地引用它：
     // copy=true 会让 runtime 再拷一份，实测每根 stem 多花一整个文件大小
     // （3.2MB 文件的 "model" 项实测 6.4MB）——CMA 是生命线，这份拷贝必须省。
@@ -215,7 +229,24 @@ static bool load_entry(const std::string &stem, int S, Entry &e) {
     e.K = (int)ish[1];
     e.OUT = (int)osh[1];
     e.S = (int)ish[2];
+    // ★ load 时注册 pool_shared（CMA）输入张量 —— client 的 load_kmodel_locked
+    // 同款（M1 验证路径的组成部分）。runtime 首次 input_tensor() 登记 DMA
+    // 用的缓冲；若首次注册的是 pool_cpu_only 的普通内存（per-invoke），
+    // GNNE 描述符指向不可 DMA 的页 → 子图静默空转（锯齿乱码根因链最后一环）。
+    // 之后每次 invoke 仍用 copy=true 的 per-invoke 张量替换，与 client 一致。
+    {
+        auto itr = nncase::runtime::host_runtime_tensor::create(
+            nncase::dt_float32, {1, (size_t)e.K, (size_t)e.S, (size_t)e.S},
+            nncase::runtime::host_runtime_tensor::pool_shared);
+        if (!itr.is_ok() || !it->input_tensor(0, itr.unwrap()).is_ok()) {
+            logf_("LOAD FAIL %s (pool_shared input tensor)", path);
+            delete it;
+            if (mb_phy) kd_mpi_sys_mmz_free(mb_phy, mb);
+            return false;
+        }
+    }
     e.inbuf.assign((size_t)e.K * e.S * e.S, 0.0f);   // 常驻输入 tile，只零一次
+    e.last_mt = e.S * e.S;                           // 整块已确认全 0
     e.mbuf = mb;
     e.mbuf_phy = mb_phy;
     g_cache[{stem, S}] = e;
@@ -253,6 +284,15 @@ static bool invoke(Entry &e, const float *x, int mt, float *y) {
     const int K = e.K, OUT = e.OUT, S = e.S, MT = S * S;
     auto t0 = clk::now();
     float *inp = e.inbuf.data();
+    // 维持"列 [mt, MT) 恒为 0"不变量：M 变小时补零被腾空的列。同 M 连续调用
+    // （prefill 一层的 7 个 GEMM、整轮同尺寸）零开销。
+    if (mt < e.last_mt) {
+        const size_t z = (size_t)(e.last_mt - mt) * sizeof(float);
+        for (int c = 0; c < K; c++) memset(inp + (size_t)c * MT + mt, 0, z);
+        e.last_mt = mt;
+    } else if (mt > e.last_mt) {
+        e.last_mt = mt;
+    }
     {
         float tile[TBLK][TBLK];
         for (int m0 = 0; m0 < mt; m0 += TBLK) {
@@ -387,6 +427,11 @@ static void handle_conn(int conn) {
                            std::chrono::steady_clock::now() - t0).count();
         g_st.calls++;
         g_st.us += dt;
+        // KPUD_TRACE=1：逐调用打点（定位小 M 调用异常变慢——M=57 实测 8.6ms
+        // 但增量轮按模型反推要 40ms，必须看到单次真数）
+        static const bool trace = getenv("KPUD_TRACE") != nullptr;
+        if (trace)
+            logf_("CALL %s mt=%u %lldus", stem, mt, dt);
         if (!ok) {
             g_st.errs++;
             logf_("ERR %s: invoke failed", stem);
@@ -480,6 +525,37 @@ int main() {
     // chatd 子进程身份：父死即 TERM（PR_SET_PDEATHSIG 跨普通 exec 保留）
     prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
     if (getppid() == 1) return 1;   // fork 与 prctl 之间父进程已死的竞态补刀
+
+    // ★ gnne_regs 预种 + gnne_init（2026-09-13 定位的本守护空转根因）：
+    // 本镜像 /dev/k230-gnne 驱动没有 mmap 回调，vendor runtime 自己映射寄存器
+    // 会失败、gnne_regs 留 NULL —— 之后每个 k230 子图静默空转（invoke 返回
+    // 成功但 GNNE 从未计算，输出=输入侧数据流的残留，锯齿状乱码）。
+    // client 的 local 路径一直有这两步（M1 时代 cos=1.0 的前提）；daemon 侧
+    // 一直缺失。必须在任何 load/invoke 之前做。
+    {
+        if (!gnne_regs) {
+            int mfd = open("/dev/mem", O_RDWR | O_SYNC);
+            if (mfd >= 0) {
+                void *regs = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+                                  MAP_SHARED, mfd, 0x80400000ULL);
+                close(mfd);
+                if (regs != MAP_FAILED) {
+                    gnne_regs = regs;
+                    logf_("gnne_regs preseeded via /dev/mem: %p", regs);
+                } else {
+                    logf_("FATAL: mmap /dev/mem 0x80400000 failed: %s",
+                          strerror(errno));
+                }
+            } else {
+                logf_("FATAL: open /dev/mem failed: %s", strerror(errno));
+            }
+        } else {
+            logf_("gnne_regs already set: %p", gnne_regs);
+        }
+        logf_("calling gnne_init");
+        gnne_init();
+        logf_("gnne_init done");
+    }
 
     auto gs = [](const char *k, const char *d) {
         const char *v = getenv(k);

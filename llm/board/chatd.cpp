@@ -90,6 +90,12 @@ static std::vector<Child> g_children;
 static bool g_shutting_down = false;
 static std::string g_lock_path;               // 单实例锁（/tmp 重启即清）
 static std::string g_log_dir;                 // 持久日志目录（ext4，重启不丢）
+static int g_wdt_fd = -1;                     // 硬件看门狗（WDT_ENABLE=1 才打开）
+
+// 喂狗。write 失败不重试：下一轮循环再喂，喂不上本身就是"该咬了"
+static void wdt_feed() {
+    if (g_wdt_fd >= 0) { ssize_t w = write(g_wdt_fd, "x", 1); (void)w; }
+}
 
 static long long now_ms() {
     struct timespec ts;
@@ -183,10 +189,14 @@ static void build_children() {
     std::string RUNNER = cf("TTS_BIN", cf("RUNNER", "")); // 隔壁换 TTS 改 conf 这一项
     std::string TTS_DIR = cf("TTS_DIR", "");
     bool KPU_ENABLE = cf("KPU_ENABLE", "0") == "1";
+    // KPU 架构选择（2026-09-13）：1=独立 kpud 守护（unix socket）；0=llmd 进程内
+    // local 模式（KPU_LOCAL，client 的 mmz 常驻路径——实测 cos=0.9998 的那条；
+    // kpud 守护的 GNNE 子图静默空转根因未除，见 docs/03 交接书）。
+    bool KPU_DAEMON = cf("KPU_DAEMON", "1") == "1";
 
     Child kpu;
     kpu.name = "kpud";
-    kpu.enabled = KPU_ENABLE;
+    kpu.enabled = KPU_ENABLE && KPU_DAEMON;
     kpu.argv = {"/mnt/data/kpu_llm/kpud"};
     kpu.env = {
         {"KPUD_S16_DIR", cf("KPU_S16_DIR", "/mnt/data/kpu_qwen/s16b")},
@@ -195,6 +205,7 @@ static void build_children() {
         {"KPUD_CAP1", "0"},
         {"KPUD_WARM", "1"},
         {"KPUD_IO_SCALE", cf("KPU_IO_SCALE", "0.5")},
+        {"KPUD_TRACE", cf("KPUD_TRACE", "")},   // 空=关；1=逐调用打点
     };
     kpu.log_path = RUN + "/kpu_out.log";
     kpu.ready_pat = "listening on";
@@ -204,8 +215,11 @@ static void build_children() {
     Child tts;
     tts.name = "tts";
     tts.enabled = !RUNNER.empty();
-    // safe_run.sh 仅作崩溃标记包装（退出码进日志），chatd 主导重启
-    tts.argv = {"/mnt/data/kpu_llm/safe_run.sh", RUN + "/tts_out.log", RUNNER};
+    // safe_run.sh 仅作崩溃标记包装（退出码进日志），chatd 主导重启。
+    // nice -n 15：合成让路给 decode/prefill（同核竞争，2026-09-14 实测
+    // decode 1.35→1.79 t/s 的差值全在调度；TTS 晚几十毫秒无感知）
+    tts.argv = {"/mnt/data/kpu_llm/safe_run.sh", RUN + "/tts_out.log",
+                "nice", "-n", "15", RUNNER};
     {
         // TTS_ARGS = runner daemon 的完整旗标表（2026-09-12 matcha 切换）。
         // 未设置 = 老版 piper 布局（--daemon --piper-dir=<TTS_DIR>）。
@@ -248,12 +262,36 @@ static void build_children() {
     llm.env = {
         {"LD_LIBRARY_PATH", "/mnt/data/kpu_llm"},
         {"LD_BIND_NOW", "1"},
-        {"KPU_DAEMON", "1"},
         {"KPU_HYBRID", "1"},
         {"KPU_MIN_M", "32"},
         {"LLMD_TTS_FIFO", RUN + "/tts_in"},
         {"LLMD_UBATCH", cf("LLMD_UBATCH", "256")},
+        {"KPU_TRACE", cf("KPU_TRACE", "")},   // 空=关；1=逐 GEMM 端到端打点
+        // S16 tile 可用下界（客户端读）：33 = M<33 的增量轮留 CPU（2026-09-13
+        // 实录：S16_MIN=17 时 M=23 增量轮 KPU 输出乱码且污染后续上下文；M=64/
+        // 33 大块全晚验证正确）。17 只在 CMA 富余且逐 stem 验过后再放开。
+        {"KPU_S16_MIN", cf("KPU_S16_MIN", "33")},
+        // stem 懒加载 CMA 地板：必须 ≥ TTS 稳态占用 + 重载余量，打穿地板
+        // 实测 GNNE 间歇故障（poll status=0x80000c00）→ 静默乱码
+        {"KPU_LOCAL_FLOOR_MB", cf("KPU_LOCAL_FLOOR_MB", "350")},
+        // 权重加载模式透传：DIO（默认，零页缓存 anon 权重）/ AUTO（mmap
+        // 页缓存，DMA 可干净逐出——local+stems 时代的推荐值，见 §8.11）
+        {"LLMD_LOAD_MODE", cf("LLMD_LOAD_MODE", "DIO")},
     };
+    if (KPU_ENABLE && KPU_DAEMON) {
+        llm.env.push_back({"KPU_DAEMON", "1"});
+    } else if (KPU_ENABLE) {
+        // local 模式：KPU 解释器常驻 llmd 进程内（mmz kmodel 背板 + 预热）。
+        // KPU_KMODEL_DIR 指向 S16 kmodel 集合；KPU_RESIDENT=常驻上限；
+        // KPU_PRELOAD=1 在 llama 模型加载前抢 CMA 完成装载+试跑（预热出
+        // 运行时段，防运行中扩池失败）。
+        llm.env.push_back({"KPU_LOCAL", "1"});
+        llm.env.push_back({"KPU_KMODEL_DIR", cf("KPU_S16_DIR", "/mnt/data/kpu_qwen/s16b")});
+        llm.env.push_back({"KPU_RESIDENT", cf("KPU_CAP16", "50")});
+        // 预载在 llmd 里实测 SIGSEGV（preload 循环，2026-09-13）；lazy 装载
+        // （0）时 llama-cli 同款配置验证过 cos=0.9998。默认 0，可 conf 调。
+        llm.env.push_back({"KPU_PRELOAD", cf("KPU_PRELOAD", "0")});
+    }
     llm.stdin_path = RUN + "/llm_in";             // FIFO（ask.sh 写问题）
     llm.log_path = RUN + "/llm_out.log";
     llm.ready_pat = "READY";
@@ -279,6 +317,14 @@ static bool ready(const Child &c) {
 }
 
 static void spawn_child(Child &c) {
+    // TTS 专杀孤儿：kvr_new --daemon 双 fork 脱管（PDEATHSIG 只打到
+    // safe_run 外壳），chatd 每次重启/退避重拉都泄漏一个旧守护——每个
+    // ~78MB anon + CMA kmodel，抢 FIFO 还会诱发 rc=134 崩溃循环。
+    // spawn 前点名清场（新进程尚未 fork，pkill 不会误伤自己人）。
+    if (std::string(c.name) == "tts") {
+        int ig = system("pkill -x kvr_new 2>/dev/null; sleep 0.3");
+        (void)ig;
+    }
     // 防 stale READY：不重启整机只重启 chatd 时，旧日志里残留的 READY/listening
     // 字样会让 ready() 秒过（实录：llmd 还在加载就报 READY）。spawn 前清空日志，
     // 门控只认本轮输出。player 的 DONE 计数对齐逻辑见 player.sh
@@ -324,6 +370,7 @@ static void spawn_child(Child &c) {
 
 static void reap_and_restart() {
     long long now = now_ms();
+    static int tts_fail_run = 0;   // TTS 连续失败计数（READY 归零）
     for (auto &c : g_children) {
         if (c.pid > 0) {
             int st = 0;
@@ -337,11 +384,17 @@ static void reap_and_restart() {
                 if (g_shutting_down) continue;
                 c.backoff_ms = c.backoff_ms ? c.backoff_ms * 2 : 1000;
                 if (c.backoff_ms > 30000) c.backoff_ms = 30000;
+                // TTS 特例：safe_run 退出即解装看门狗，30s 退避间隙 ≈ WDT
+                // 超时 → 崩溃循环必触发整机复位（2026-09-13 实录 10:34 WDT
+                // bounce）。上限压到 2s，让喂狗链的断档远小于超时。
+                if (std::string(c.name) == "tts" && c.backoff_ms > 2000)
+                    c.backoff_ms = 2000;
                 c.restart_at_ms = now + c.backoff_ms;
                 logf_("%s restart in %dms", c.name, c.backoff_ms);
             } else if (r == 0 && !c.up && !c.ready_pat.empty() && ready(c)) {
                 c.up = true;
                 c.backoff_ms = 0;
+                if (std::string(c.name) == "tts") tts_fail_run = 0;
                 logf_("%s READY", c.name);
             }
             continue;
@@ -350,6 +403,27 @@ static void reap_and_restart() {
         if (!g_shutting_down && c.enabled && c.restart_at_ms &&
             now >= c.restart_at_ms) {
             c.restart_at_ms = 0;
+            // CMA 碎片自愈（2026-09-15 实录：TTS 崩溃循环 361 次——kvr 在
+            // gnne_init 后装载 kmodel 时因 CMA 碎片化 abort(rc=134)，重启
+            // 永不成功。重启前 drop_caches 释放被页缓存借走的 CMA 连续
+            // 内存，让下一次装载有料；装载成功后不再走这里）。
+            if (std::string(c.name) == "tts") {
+                // 连续失败 3 次 = CMA 被 llmd 钉死(碎片化)，drop_caches 治不了：
+                // 连 llmd 一起拉掉重排内存（llmd 由本循环自动重拉，~30s 恢复）。
+                // 2026-09-15 实录：mmz 11.5MB 连续分配失败 → TTS 崩溃循环 361 次。
+                tts_fail_run++;
+                logf_("tts fail run %d", tts_fail_run);
+                if (tts_fail_run >= 3) {
+                    tts_fail_run = 0;
+                    logf_("tts x3 fail -> recycle llmd to unpin CMA");
+                    pid_t lp = -1;
+                    for (auto &x : g_children)
+                        if (std::string(x.name) == "llmd") lp = x.pid;
+                    if (lp > 0) kill(lp, SIGKILL);
+                }
+                int ig = system("echo 3 > /proc/sys/vm/drop_caches 2>/dev/null");
+                (void)ig;
+            }
             spawn_child(c);
         }
     }
@@ -452,6 +526,13 @@ int main(int argc, char **argv) {
     drop_caches();                                // CMA/mmz 大块分配前提（svc 时代教训）
     signal(SIGCHLD, SIG_DFL);
     signal(SIGTERM, [](int) {
+        // 维护性 stop：magic-close 防咬狗。若驱动 nowayout=1 则 magic close
+        // 无效——启用 WDT_ENABLE 前必须板上实测 stop 后不重启
+        if (g_wdt_fd >= 0) {
+            ssize_t w = write(g_wdt_fd, "V", 1); (void)w;
+            close(g_wdt_fd);
+            g_wdt_fd = -1;
+        }
         unlink(g_lock_path.c_str());
         _exit(0);           // chatd 自己收 TERM：立即走人，子进程由 PDEATHSIG 兜底
     });
@@ -465,6 +546,44 @@ int main(int argc, char **argv) {
             logf_("%s %s", c.name, c.up ? "READY" : "NOT-READY (continue)");
     }
     logf_("all children started; entering supervise loop");
+    // 开机 KV 预热（2026-09-16 泛化，BOOT_WARMUP=1 默认开）：llmd 常驻跨轮
+    // 共享 KV，开机替用户把 system+一轮对话垫进 KV，首问只 prefill 问题本身
+    // （实录 17s→~4s）。预热轮 out 路径含 /warmup，llmd 侧静音 TTS 不出声。
+    // 原始动机（2026-09-13）：KPU local 模式懒装载 ~91 根 kmodel 的预热。
+    if (cf("BOOT_WARMUP", "1") == "1") {
+        std::string run = cf("RUN", "/tmp/chat");
+        std::string fifo = run + "/llm_in";
+        std::string out = run + "/warmup_out.txt";
+        std::string line = out + "\t8\t请你用两三句话向我详细介绍一下你自己，"
+                                "包括你的名字、你会做什么，以及你应该怎么称呼\n";
+        // 结尾必须带 '\n'：llmd 用 std::getline 按行读 FIFO，无换行且写端
+        // 关闭时该行被吞（2026-09-13 实录：预热从未送达，turn0 永远是用户
+        // 首问在付装载成本）。ask.sh 的 printf 带 \n 同款验证可用。
+        pid_t wp = fork();
+        if (wp == 0) {
+            // 独立子进程：等 FIFO 就绪后写入；结果文件落在 tmpfs，重启即清
+            int tries = 0;
+            while (access(fifo.c_str(), W_OK) != 0 && tries < 120) { sleep(1); tries++; }
+            std::string pending = run + "/ask_pending";
+            // 避让用户（2026-09-14 实录：warmup 装载 + 用户首问 + TTS 三方
+            // 挤 CMA → WDT 弹回 ×2）：用户已排队（ask_pending 在）就放弃
+            // 预热——首问自己热身（懒装载有地板护栏），不做双重压力
+            // 错峰（2026-09-14 实录二）：TTS 开机装载未完成时 warmup 立刻
+            // 开跑，stem 装载被拖过看门狗阈值遭误杀，排队用户问句随 FIFO
+            // 缓冲一起丢——先让 TTS 独占装载 60s，窗口内用户提问则弃预热
+            for (int t = 0; t < 60; t++) {
+                if (access(pending.c_str(), F_OK) == 0) {
+                    fprintf(stderr, "[chatd] warmup skipped: user ask pending\n");
+                    _exit(0);
+                }
+                sleep(1);
+            }
+            FILE * f = fopen(fifo.c_str(), "w");
+            if (f) { fwrite(line.data(), 1, line.size(), f); fclose(f); }
+            _exit(0);
+        }
+        if (wp > 0) logf_("kpu warmup ask forked pid=%d", (int)wp);
+    }
     // llmd 解码卡死看门狗：实录（2026-09-12）排队多轮提问时 llmd KPU 混合
     // 解码偶发死旋——R 态 100% 单核空转、零输出、不发 kpud 请求（上游
     // llama.cpp fork 的 kpud 客户端疑因重连后状态残留）。正常一轮 ≤60s，
@@ -473,22 +592,102 @@ int main(int argc, char **argv) {
     std::string llm_log = cf("RUN", "/tmp/chat") + "/llm_out.log";
     std::string pending = cf("RUN", "/tmp/chat") + "/ask_pending";
     long long llm_size = -1, llm_last_change = now_ms();
+    // 硬件看门狗接管（2026-09-15 实录）：普通短问句触发 llmd R 态自旋把
+    // 唯一 CPU 吃满，chatd/adbd 全部饿死，只能人工断电。分层自救：轻卡死
+    // 由上面 180s 软杀看门狗恢复（软路径保数据不重启）；chatd 自己被饿死
+    // 或软杀无效（ask pending 且 llm_out.log 冻结 >240s）则主动停喂，
+    // 硬件 ~1min 内咬狗重启整机，S99chat 开机序自愈。WDT_ENABLE 默认 0：
+    // vendor 驱动 nowayout 行为未实测前不启用。
+    if (cf("WDT_ENABLE", "0") == "1") {
+        g_wdt_fd = open("/dev/watchdog", O_WRONLY);
+        if (g_wdt_fd >= 0) {
+            wdt_feed();
+            logf_("hardware watchdog armed (feed 8s)");
+        } else {
+            logf_("watchdog open failed: %s", strerror(errno));
+        }
+    }
+    long long wdt_last_feed = now_ms();
+    bool wdt_bait = false;
     while (true) {
         usleep(200000);
         reap_and_restart();
+        if (g_wdt_fd >= 0) {
+            long long nw = now_ms();
+            bool frozen = access(pending.c_str(), F_OK) == 0 &&
+                          nw - llm_last_change > 240000;
+            if (frozen && !wdt_bait) {
+                wdt_bait = true;
+                logf_("chain frozen 240s past soft watchdog: stop feeding, "
+                      "HW reboot imminent");
+            } else if (!frozen && wdt_bait) {
+                wdt_bait = false;      // 日志恢复增长 = 活了，继续喂
+                logf_("chain recovered: resume watchdog feeding");
+            }
+            if (!wdt_bait && nw - wdt_last_feed > 8000) {
+                wdt_feed();
+                wdt_last_feed = nw;
+            }
+        }
         struct stat st;
         if (stat(llm_log.c_str(), &st) == 0) {
             long long sz = (long long)st.st_size;
             if (sz != llm_size) {
                 llm_size = sz;
                 llm_last_change = now_ms();
-            } else if (now_ms() - llm_last_change > 600000 &&
+            } else if (now_ms() - llm_last_change > 60000 &&
                        access(pending.c_str(), F_OK) == 0) {
                 for (auto &c : g_children)
                     if (std::string(c.name) == "llmd" && c.pid > 0 &&
                         c.up && kill(c.pid, 0) == 0) {
+                        // 击杀前取证（2026-09-16 用户实录连续 stall）：采样
+                        // 主线程状态/自增 CPU 时间，找最忙线程并留内核栈。
+                        // 判读：state=R 且 utime 涨 → 计算自旋（llmd 内核
+                        // bug）；state=S 且 utime 不动 → 转发/管道断（chatd 侧）
+                        char pbuf[128];
+                        auto snap = [&](long long pid) {
+                            snprintf(pbuf, sizeof pbuf,
+                                     "/proc/%lld/stat", pid);
+                            FILE * f = fopen(pbuf, "r");
+                            if (!f) return std::string("gone");
+                            char st = '?';
+                            long long ut = 0;
+                            { char line[512]; fgets(line, sizeof line, f);
+                              char * p = strrchr(line, ')');
+                              if (p) sscanf(p + 2, "%c %*s %*s %*s %*s %*s"
+                                  " %*s %*s %*s %*s %*s %*s %lld",
+                                  &st, &ut); }
+                            fclose(f);
+                            char b[64];
+                            snprintf(b, sizeof b, "%c ut=%lld", st, ut);
+                            return std::string(b);
+                        };
+                        std::string s1 = snap(c.pid);
+                        usleep(2000000);
+                        std::string s2 = snap(c.pid);
+                        logf_("stall forensics: llmd %lld then %s now %s",
+                              (long long)c.pid, s1.c_str(), s2.c_str());
+                        // 最忙线程栈（R 态自旋时该栈即案发现场）
+                        {
+                            std::string stall_path =
+                                cf("RUN", "/tmp/chat") + "/stall_threads.txt";
+                            char cmd[600];
+                            snprintf(cmd, sizeof cmd,
+                                "for t in /proc/%lld/task/*; do "
+                                "tid=${t##*/}; "
+                                "u=$(awk '{print $14}' $t/stat 2>/dev/null); "
+                                "echo \"tid=$tid u=$u\"; done "
+                                "| sort -t= -k3 -nr | head -2 > %s; "
+                                "tid0=$(head -1 %s | sed 's/tid=//;s/ .*//'); "
+                                "cat /proc/$tid0/stack >> %s 2>/dev/null",
+                                (long long)c.pid, stall_path.c_str(),
+                                stall_path.c_str(), stall_path.c_str());
+                            system(cmd);
+                            logf_("stall threads snapshot -> %s",
+                                  stall_path.c_str());
+                        }
                         logf_("llmd stall watchdog: pending ask, no output "
-                              "10min, KILL");
+                              "60s, KILL");
                         kill(c.pid, SIGKILL);
                         unlink(pending.c_str());
                         llm_last_change = now_ms();  // 防连环杀（等 reap 走流程）

@@ -1,31 +1,35 @@
 #!/bin/sh
-# S99chat — chatd 总管版（2026-09-11 定版）
-# 唯一流水 = chatd（kpud + tts + player + llmd），legacy svc_*.sh 退役。
-# chatd 职责：有序拉起(kpud→tts→player→llmd)、逐个 READY 门控、崩溃退避
-# 重启、stop 有序拆除；log=/tmp/chat/chatd.log，子进程日志各自落在
-# /tmp/chat/{kpu_out,tts_out,llm_out}.log
-# 注意：/tmp 是 tmpfs，开机先 mkdir（boot_trace race 前科）
-# 持久日志（2026-09-12）：/var/log → /tmp 是符号链接，整机日志重启即蒸发。
-# chatd 把自己的流水+子进程崩溃取证（dmesg/内存/进程表快照）写
-# /mnt/data/chat/logs；这里再把 syslogd（kernel/OOM/panic 唯一幸存路径）
-# 指到同一持久目录。S01 跑 syslogd 时 /mnt/data 未必已挂，故在 S99 重启它
-# 一次——此时 chatd 都能读 /mnt/data 的模型，挂载必然完成。
-
+# S99chat — chatd 总管版（2026-09-11 定版；2026-09-14 加开机预热+readahead）
 PLOG=/mnt/data/chat/logs
 
 case "$1" in
   start)
     mkdir -p /tmp/chat
-    # 弱信号(-73dBm)下免 PS 睡眠放大尾延迟；实测无害，开机幂等设置
+    # 防呆:清掉上次异常退出残留的孤儿 wav/半截回答,日志重开(player 靠 DONE 行计数,残留会错位)
+    rm -f /tmp/chat/utt_*.wav /tmp/chat/ask_out.txt /tmp/chat/chatd.lock 2>/dev/null
+    : > /tmp/chat/tts_out.log 2>/dev/null
+    : > /tmp/chat/llm_out.log 2>/dev/null
     iwconfig wlan0 power off 2>/dev/null
-    # syslogd 持久化（幂等：已在写持久文件就不折腾）。注意 /etc/default
-    # 目录在部分镜像上重启会消失，别依赖它——直接带参数拉 syslogd
+    # 串口防刷屏(2026-09-16 用户实录:内核 warn 直接打断终端输出+切碎汉字)。
+    # loglevel 3=仅 err 上串口;全量消息仍进 syslogd 文件供取证
+    echo 3 > /proc/sys/kernel/printk 2>/dev/null
+    # 顺序大文件读加速（GGUF/mmap fault-around 走 readahead）
+    echo 1024 > /sys/block/mmcblk0/queue/read_ahead_kb 2>/dev/null
     mkdir -p "$PLOG"
-    ps aux | grep 'syslog[d]' | grep -q 'chat/logs' || {
+    ps aux | grep "syslog[d]" | grep -q "chat/logs" || {
       kill "$(cat /var/run/syslogd.pid 2>/dev/null)" 2>/dev/null
       sleep 0.3
       syslogd -O "$PLOG/messages" -s 4096 -b 2
     }
+    # 开机预热（2026-09-14）：模型 573MB 是 mmap 懒加载，第一问要从 SD
+    # 现拉 ~27s（4bit@50MHz 实测 ~21MB/s，HS 模式物理上限）。后台预读
+    # 进页缓存后，mmap 缺页变Minor，第一问不再付磁盘钱。TTS kmodel 同理。
+    (
+      sleep 8
+      . /mnt/data/chat/chat.conf 2>/dev/null
+      nice -n 19 cat "${LLM_MODEL:-/mnt/data/models/Qwen3-0.6B-Q8_0_q6k_tied.gguf}" > /dev/null 2>&1
+      nice -n 19 cat /mnt/data/matcha/*.kmodel > /dev/null 2>&1
+    ) &
     (
       sleep 5
       /mnt/data/kpu_llm/chatd start > /tmp/chat/chatd.log 2>&1
@@ -33,10 +37,16 @@ case "$1" in
     ;;
   stop)
     /mnt/data/kpu_llm/chatd stop 2>/dev/null
+    sleep 2
+    # 防呆(2026-09-15 实录):chatd stop 静默失败会把旧实例连同旧配置留在
+    # 后台,新 start 撞单实例锁直接退出,表面"重启成功"实际没换配置
+    pkill -x chatd 2>/dev/null
     pkill -x kpud 2>/dev/null
     pkill -x kpu_vits_runner 2>/dev/null
     pkill -x llmd 2>/dev/null
     pkill -f "player.s[h]" 2>/dev/null
+    sleep 1
+    pgrep -x "chatd|llmd|kpu_vits_runner" >/dev/null && echo "S99chat WARN: process survived stop" >&2
     ;;
   status)
     /mnt/data/kpu_llm/chatd status 2>/dev/null \

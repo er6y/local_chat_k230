@@ -99,7 +99,11 @@ def build_onnx_and_kmodel(tag, W, outdir, want_probe=True, svec=None):
     co = nncase.CompileOptions()
     co.target = "k230"
     co.quant_type = "int8"; co.w_quant_type = "int8"
-    co.input_type = "int8"; co.output_type = "int8"
+    # 2026-09-13：IO dtype 可调。int8 IO + 生产 f32 喂入 = 字节错读（真机锯齿
+    # 乱码根因，见 docs/03 交接书 §2）；float32 IO 让图边界自行 quant/dequant，
+    # 生产 daemon（f32 create+copy）零改动直用。
+    co.input_type = os.environ.get("KPU_IO_DTYPE", "int8")
+    co.output_type = os.environ.get("KPU_IO_DTYPE", "int8")
     co.input_layout = "NCHW"; co.output_layout = "NCHW"
     co.dump_ir = False
     compiler = nncase.Compiler(co)
