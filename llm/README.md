@@ -3,8 +3,9 @@
 Qwen2.5-0.5B-24L 自编译 kmodel 在 K230 上的 decode 极速线。
 llama.cpp 路线已退役删除。
 
-**编译器 fork 在上一级：`../nncase/`（modules/Nncase.Modules.K230，官方默认路径，
-TTS 线共用）。fork 官方仓后以分支形式维护。**
+**编译器 fork = 上一级 submodule `../nncase/`（github.com/er6y/nncase 分支 `k230`，
+基线钉 v2.8.3；modules/Nncase.Modules.K230，官方默认路径，TTS 线共用。
+详见 `../docs/nncase-fork.md`）。**
 
 ## 现状（2026-09-24）
 
@@ -52,7 +53,7 @@ python3 board/static/bd_kv6q2cpu.py /mnt/data/static/llm_kv6_stacked.kmodel 20
 
 | 改动类型 | 归属 | 现状 |
 |---|---|---|
-| 编译器 pass/发射/量化规则 | `../nncase/modules/Nncase.Modules.K230`（fork kendryte/nncase） | ✅ 已入库，待 fork URL 后推远端 |
+| 编译器 pass/发射/量化规则 | `../nncase/` submodule（github.com/er6y/nncase 分支 k230，基线 v2.8.3，模块提交 bfdfd9a8） | ✅ 已推远端，构建+哨兵验证过（docs/nncase-fork.md） |
 | 模型图结构（改 ONNX 本体） | `surgery/`（部分将来可编译器化，见其 README） | ✅ |
-| 宿主 C++（demo/计时器） | `cxx/`（qwen_chat 补丁应上 ai_assistant fork） | overlay 就绪，待 fork URL |
+| 宿主 C++（demo/计时器） | `cxx/`（自留，后续生成备用模型直接用） | ✅ |
 | 板上测量/取证 | `board/static/` + `tools/` | ✅ |

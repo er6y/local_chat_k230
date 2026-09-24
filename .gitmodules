@@ -1,3 +1,7 @@
 [submodule "models/qwen3_06b"]
 	path = models/qwen3_06b
 	url = https://gh-proxy.com/https://huggingface.co/Qwen/Qwen3-0.6B
+[submodule "nncase"]
+	path = nncase
+	url = https://github.com/er6y/nncase.git
+	branch = k230
