@@ -1,42 +1,35 @@
-# 板上运行资产
+# board/ — 板端资产与生产基础设施
 
-部署目标：`/mnt/data/kpu_llm/`（持久分区，reset 不丢）。
+部署目标：`/mnt/data/`（持久分区）。**两个时代并存，别搞混：**
 
-## 必部署清单
+## 现役 = static/（静态 kmodel 测量与打分）
 
-| 文件 | 作用 |
-|---|---|
-| `safe_run.sh` | WDT 喂狗包裹器，一切测试必须经它跑 |
-| `selftest_bn2.sh` | KPU 数值自检（判据 cos>0.98） |
-| `kpu_gemm_daemon.py` | socket 守护进程（KPU_DAEMON=1 备胎模式用） |
-| `run_decode_test.sh` | decode 回归 |
-| `oc_k230v2.py` | 板上校准工具 |
-| `rootfs-overlay/S52wifi` + `usr-local-bin/wifi_keepalive.sh` | WiFi 自愈链（装到 /etc/init.d 与 /usr/local/bin） |
+qwen25 kv6_stacked 线的板端权威工具全在 **`static/`**（详见其 README）：
+`bd_kv6q2cpu.py`（计时+指纹判定）、`noc_poke.sh`（NOC QoS 解锁）、
+`bench_official_matrix.py`（官方 202ms 条件扫）、剖析/取证脚本族。
+一键流水线 `../oneclick/qwen25.sh` 的 bench 段调的就是这里。
 
-## 运行环境（现役基线）
+## 生产基础设施（顶层，chatd/kpud 时代）
 
-```sh
-cd /mnt/data/kpu_llm
-export LD_LIBRARY_PATH=.
-export LD_BIND_NOW=1
-export KPU_KMODEL_DIR=/mnt/data/kpu_qwen/s4sq_q8
-export KPU_TILES=s4
-export KPU_RESIDENT=10
-export KPU_PRELOAD=0
-export KPU_LOCAL=1        # 进程内 runtime（现役）；备胎用 KPU_DAEMON=1
-export GNNE_QUIET=1
-```
+| 文件 | 作用 | 状态 |
+|---|---|---|
+| `chatd.cpp` / `kpud.cpp` | 语音助手守护进程源码（chatd 总管 + kpud KPU 池） | **生产栈 2026-09-18 停用**（用户裁定"等隔壁把 llm 弄好再说"），恢复 = `chmod +x /etc/init.d/S99chat` |
+| `safe_run.sh` | WDT 喂狗包裹器，一切长任务必须经它跑 | ✅ 现役纪律 |
+| `selftest_bn2.sh` | KPU 数值自检（判据 cos>0.98） | ✅ 现役 |
+| `rootfs-overlay/S52wifi` + `usr-local-bin/wifi_keepalive.sh` | WiFi 自愈链（装 /etc/init.d 与 /usr/local/bin） | ✅ 现役（8189fs 5.11.6 配套） |
+| `gnne/` | GNNE 寄存器/trace 排障（定位过 gnne_regs 未映射静默零输出） | 排障时用 |
 
-板上资产目录：`/mnt/data/kpu_qwen/`（kmodel 全集）、`/mnt/data/models/`（gguf）。
+## lab/（一次性调试脚本归档）
 
-## 板上纪律（红线）
+kpud 守护进程时代的排障脚本：kpu_leak/probe/repro/real_test、selftest_bindnow、
+start_daemon_test、chat_sim、samp_ab、run_decode_test、oc_k230v2（板上校准）、
+kpu_gemm_daemon（KPU_DAEMON 备胎模式）。**只有复现历史问题才进来**；
+背景见 docs/00~03 号交接书（2026-09-01 ~ 09-13）。
+
+## 板上纪律（红线，长存）
 
 - 测试必须 `safe_run.sh` 包裹 + 落盘 `/mnt/data/*.log`
-- 长任务用 `nohup setsid ... &` 后台跑，轮询 tail
-- 写文件后 `sync` 再 reboot
-- CmaFree < ~400MB 先 reboot（nncase load 段泄漏，长跑必脏池）
-- daemon 被 kill -9 后 mmz 段滞留 → drop_caches 或重启
-
-## gnne/ 诊断工具
-
-`check_gnne.py` / `gnne_trace.sh` / `gnne_fast_trace.py` — GNNE 寄存器与 trace 排障用（历史上定位过 gnne_regs 未映射导致的静默零输出）。
+- 长任务 `nohup setsid ... &`，轮询 tail；写文件后 `sync` 再 reboot
+- **CMA 三铁律**：大装载之间必 reboot；开机满 230s 才跑；跑模型前 drop_caches
+  （详见 `../oneclick/qwen25.sh` bench 段的内置实现）
+- 模型/日志只进 /mnt/data（root 分区 364M 红线）
