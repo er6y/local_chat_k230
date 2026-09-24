@@ -1,0 +1,15 @@
+--- /mnt/d/work/git_dev/k230_prj/downloads/k230_ai/k230_ai_assistant/src/qwen_chat/src/tokenizer.cpp	2025-03-20 10:59:02.000000000 +0800
++++ /root/qwen_chat_dbg/src/tokenizer.cpp	2026-09-19 18:04:46.504485400 +0800
+@@ -408,10 +408,11 @@
+ }
+ 
+ std::string Sentencepiece::decode(int id) {
++    if (id < 0 || id >= (int)sentence_pieces_.size()) { return ""; }
+     auto piece = sentence_pieces_[id].piece;
+     int pos = piece.find("▁");
+     if (pos != -1) {
+-        piece.replace(pos, pos + 3, " ");
++        piece.replace(pos, 3, " ");
+     }
+     return piece;
+ }

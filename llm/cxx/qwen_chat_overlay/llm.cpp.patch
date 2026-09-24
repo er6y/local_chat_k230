@@ -1,0 +1,84 @@
+--- /mnt/d/work/git_dev/k230_prj/downloads/k230_ai/k230_ai_assistant/src/qwen_chat/src/llm.cpp	2025-03-20 10:59:02.000000000 +0800
++++ /root/qwen_chat_dbg/src/llm.cpp	2026-09-20 15:42:00.928585700 +0800
+@@ -6,6 +6,8 @@
+ //
+ 
+ #include <iostream>
++#include <cstdio>
++#include <cstring>
+ #include <fstream>
+ #include <nncase/runtime/simple_types.h>
+ #include <nncase/runtime/runtime_op_utility.h>
+@@ -45,6 +47,21 @@
+         std::ifstream embedding_bin(config_->embedding_file());
+         embedding_bin.close();
+     }
++    // 0. optional vocab-prune remap (remap_u32.bin next to embeddings)
++    {
++        std::string ef = config_->embedding_file();
++        std::string dir = ef.substr(0, ef.find_last_of('/') + 1);
++        std::ifstream rf(dir + "remap_u32.bin", std::ios::binary);
++        if (rf.good()) {
++            rf.seekg(0, std::ios::end);
++            size_t n = rf.tellg() / 4;
++            rf.seekg(0, std::ios::beg);
++            remap_.resize(n);
++            rf.read(reinterpret_cast<char*>(remap_.data()), n * 4);
++            for (uint32_t i = 0; i < (uint32_t)remap_.size(); i++) inv_remap_[(int)remap_[i]] = (int)i;
++            printf("remap loaded: %d ids (vocab pruned)\n", (int)n);
++        }
++    }
+     // 1. load vocab
+     printf("load tokenizer\n");
+     tokenizer_.reset(Tokenizer::createTokenizer(config_->tokenizer_file()));
+@@ -65,7 +82,16 @@
+     inputs.emplace_back(gen_attention_mask(seq_len));
+     inputs.emplace_back(gen_position_ids(seq_len));
+     inputs.emplace_back(std::move(past_key_values_));
+-    auto outputs = module_->onForward(inputs);
++    fprintf(stderr, "[fwd] seq=%d n_inputs=%zu\n", seq_len, inputs.size());
++    { FILE* mf = fopen("/proc/meminfo", "r");
++      if (mf) { char b[256]; while (fgets(b, sizeof b, mf)) if (!strncmp(b, "CmaFree", 7)) { fputs(b, stderr); break; } fclose(mf); } }
++    nncase::tuple outputs;
++    try {
++        outputs = module_->onForward(inputs);
++    } catch (const std::exception& e) {
++        fprintf(stderr, "[fwd] onForward threw: %s\n", e.what());
++        throw;
++    }
+     auto logits = outputs->fields()[0].as<nncase::tensor>().unwrap_or_throw();
+     past_key_values_ = std::move(outputs->fields()[1]);
+     all_seq_len_ += seq_len;
+@@ -74,7 +100,13 @@
+ }
+ 
+ int Llm::sample(nncase::tensor& logits, const std::vector<int>& pre_ids) {
+-    std::unordered_set<int> ids_set(pre_ids.begin(), pre_ids.end());
++    std::unordered_set<int> ids_set;
++    for (auto id : pre_ids) {
++        if (inv_remap_.empty()) { ids_set.insert(id); continue; }
++        auto it = inv_remap_.find(id);
++        if (it == inv_remap_.end()) { continue; }
++        ids_set.insert(it->second);
++    }
+     auto logits_buffer = logits->buffer().as_host().unwrap_or_throw();
+     auto logits_mapped = logits_buffer.map(nncase::runtime::map_read).unwrap_or_throw();
+     auto scores = logits_mapped.buffer().as_span<float>();
+@@ -83,6 +115,7 @@
+     // repetition penalty
+     const float repetition_penalty = 1.1;
+     for (auto id : ids_set) {
++        if (id < 0 || id >= size) { continue; }
+         float score = scores[id];
+         scores[id] = score < 0 ? score * repetition_penalty : score / repetition_penalty;
+     }
+@@ -96,6 +129,9 @@
+             token_id = i;
+         }
+     }
++    if (!remap_.empty() && token_id >= 0 && token_id < (int)remap_.size()) {
++        token_id = (int)remap_[token_id];
++    }
+     return token_id;
+ }
+ 

@@ -1,0 +1,12 @@
+--- /mnt/d/work/git_dev/k230_prj/downloads/k230_ai/k230_ai_assistant/src/qwen_chat/include/llm.hpp	2025-03-20 10:59:02.000000000 +0800
++++ /root/qwen_chat_dbg/include/llm.hpp	2026-09-19 21:13:18.869854000 +0800
+@@ -97,6 +97,9 @@
+     int gen_seq_len_ = 0;
+     int all_seq_len_ = 0;
+     std::vector<int> history_ids_;
++    // vocab-prune remap: new_id -> old_id (loaded from remap_u32.bin if present)
++    std::vector<uint32_t> remap_;
++    std::unordered_map<int,int> inv_remap_;
+     // time
+     int64_t prefill_us_ = 0;
+     int64_t decode_us_ = 0;

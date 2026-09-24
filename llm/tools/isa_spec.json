@@ -1,0 +1,4206 @@
+{
+ "enums": {
+  "GP_REGISTER": {
+   "x0": 0,
+   "x1": 1,
+   "x2": 2,
+   "x3": 3,
+   "x4": 4,
+   "x5": 5,
+   "x6": 6,
+   "x7": 7,
+   "x8": 8,
+   "x9": 9,
+   "x10": 10,
+   "x11": 11,
+   "x12": 12,
+   "x13": 13,
+   "x14": 14,
+   "x15": 15,
+   "x16": 16,
+   "x17": 17,
+   "x18": 18,
+   "x19": 19,
+   "x20": 20,
+   "x21": 21,
+   "x22": 22,
+   "x23": 23,
+   "x24": 24,
+   "x25": 25,
+   "x26": 26,
+   "x27": 27,
+   "x28": 28,
+   "x29": 29,
+   "x30": 30,
+   "x31": 31,
+   "invalid": 32
+  },
+  "OPCODE": {
+   "lui": 2,
+   "auipc": 4,
+   "load": 6,
+   "store": 8,
+   "arithm": 12,
+   "arithm_imm": 14,
+   "branch": 16,
+   "jal": 18,
+   "jalr": 20,
+   "intr": 1,
+   "end": 3,
+   "fence": 5,
+   "fence_i": 7,
+   "extrw": 22,
+   "extraw": 24,
+   "ss_pack_shape": 64,
+   "ss_pack_stride": 66,
+   "ccr_decl": 65,
+   "ccr_set": 67,
+   "ccr_clr": 69,
+   "mmu_conf": 68,
+   "mmu_set_id": 73,
+   "l2_load_conf": 70,
+   "l2_store_conf": 74,
+   "l2_load": 76,
+   "l2_store": 78,
+   "l2_load_w_conf": 72,
+   "l2_load_w": 87,
+   "dm_conf_broadcast": 75,
+   "dm_conf": 80,
+   "dm_load_l1": 82,
+   "dm_load_w": 84,
+   "dm_load_act0": 86,
+   "dm_store_of": 88,
+   "pu_conf": 90,
+   "pu_compute": 77,
+   "pu_forward_psum": 92,
+   "pu_pdp0_conf": 94,
+   "pu_pdp0_compute": 79,
+   "act0_conf": 96,
+   "act0_compute": 116,
+   "mfu_conf": 98,
+   "mfu_memcpy": 100,
+   "mfu_memset": 102,
+   "mfu_transpose": 104,
+   "mfu_pdp1_compute": 106,
+   "mfu_act1_compute": 114,
+   "ai2d_compute": 81
+  },
+  "PU_OF_SHIFT_MODE": {
+   "none": 0,
+   "left_shift_4": 1,
+   "right_shift_4": 2
+  },
+  "SHAPE_REGISTER": {
+   "ss0": 0,
+   "ss1": 1,
+   "ss2": 2,
+   "ss3": 3,
+   "ss4": 4,
+   "ss5": 5,
+   "ss6": 6,
+   "ss7": 7
+  },
+  "ACT0_CHANNEL": {
+   "pu": 0,
+   "pdp0": 1
+  },
+  "ACT0_CONF_FUNCTION": {
+   "act_src1_conf": 0
+  },
+  "ACT0_OUTPUT_DEST": {
+   "psum": 0,
+   "dm": 1,
+   "psum_dm": 2
+  },
+  "ACT1_SOURCE_TYPE": {
+   "l2": 0,
+   "psum": 1
+  },
+  "ACT_OUTPUT_TYPE": {
+   "u8": 0,
+   "i8": 1,
+   "fp16": 2,
+   "i16": 3
+  },
+  "ARITHMETIC_FUNCTION": {
+   "add": 0,
+   "sub": 1,
+   "mul": 2,
+   "div": 3,
+   "divu": 4,
+   "rem": 5,
+   "remu": 6
+  },
+  "ARITHMETIC_IMM_FUNCTION": {
+   "addi": 0
+  },
+  "BRANCH_FUNCTION": {
+   "beq": 0,
+   "bne": 1,
+   "blt": 2,
+   "bltu": 3,
+   "bge": 4,
+   "bgeu": 5
+  },
+  "DDR_DATATYPE": {
+   "i8": 0,
+   "fp16": 1,
+   "fp32": 2,
+   "i4": 3,
+   "i6": 4,
+   "i16": 5
+  },
+  "DM_CONF_FUNCTION": {
+   "load_l1_conf": 0,
+   "load_w_conf": 1,
+   "load_w_conf_deq": 2,
+   "load_act_params": 3,
+   "store_of_conf": 4,
+   "load_w_conf2": 5
+  },
+  "DM_LOAD_W_DEST": {
+   "pu": 0,
+   "pdp0": 1
+  },
+  "L1_TYPE": {
+   "if_": 0,
+   "w": 1,
+   "psum": 2
+  },
+  "L2_DATATYPE": {
+   "i8": 0,
+   "fp16": 1,
+   "i16": 2
+  },
+  "LOAD_FUNCTION": {
+   "lw": 0,
+   "lh": 1,
+   "lhu": 2,
+   "lb": 3,
+   "lbu": 4
+  },
+  "MFU_ACT1_FUNCTION": {
+   "add": 0,
+   "mul": 1
+  },
+  "MFU_CONF_FUNCTION": {
+   "transpose_conf": 0,
+   "pdp1_conf1": 1,
+   "pdp1_conf2": 2,
+   "pdp1_conf3": 3,
+   "pdp1_conf4": 4,
+   "pdp1_conf_op_in": 5,
+   "pdp1_conf_deq": 6,
+   "pdp1_conf_quant": 7,
+   "act1_conf_stride": 8,
+   "act1_conf_src1": 9,
+   "act1_conf_src2": 10,
+   "act1_conf_dest": 11,
+   "act1_conf_deq": 12,
+   "act1_conf_quant": 13,
+   "act1_conf": 14
+  },
+  "MFU_TRANS_PERMUTE": {
+   "NCHW": 0,
+   "NCWH": 1,
+   "NHCW": 2,
+   "NHWC": 3,
+   "NWCH": 4,
+   "NWHC": 5,
+   "CNHW": 6,
+   "CNWH": 7,
+   "CHNW": 8,
+   "CHWN": 9,
+   "CWNH": 10,
+   "CWHN": 11,
+   "HNCW": 12,
+   "HNWC": 13,
+   "HCNW": 14,
+   "HCWN": 15,
+   "HWNC": 16,
+   "HWCN": 17,
+   "WNCH": 18,
+   "WNHC": 19,
+   "WCNH": 20,
+   "WCHN": 21,
+   "WHNC": 22,
+   "WHCN": 23
+  },
+  "PDP_FUNCTION": {
+   "min": 0,
+   "max": 1,
+   "average": 2,
+   "sum": 3
+  },
+  "PU_COMPUTE_MODE": {
+   "pu_mode_normal": 0,
+   "pu_mode_deconv": 1
+  },
+  "PU_CONF_FUNCTION": {
+   "pu_fetchif_conf1": 0,
+   "pu_fetchif_conf2": 1,
+   "pu_fetchif_conf3": 2,
+   "pu_fetchif_conf4": 3,
+   "pu_fetchif_conf_deq": 4,
+   "pu_w_conf": 5,
+   "pu_of_conf1": 6,
+   "pu_of_conf2": 7,
+   "pu_compute_conf": 8
+  },
+  "PU_OUTPUT_DEST": {
+   "psum": 0,
+   "act0": 1
+  },
+  "PU_PDP0_CONF_FUNCTION": {
+   "pdp0_mode_conf": 0,
+   "pdp0_fetchif_conf1": 1,
+   "pdp0_fetchif_conf2": 2,
+   "pdp0_fetchif_conf3": 3,
+   "pdp0_fetchif_conf4": 4,
+   "pdp0_fetchif_conf_deq": 5,
+   "pdp0_w_conf": 6,
+   "pdp0_of_conf": 7
+  },
+  "PU_PDP0_MODE": {
+   "dw": 0,
+   "min": 1,
+   "max": 2,
+   "sum": 3,
+   "average": 4
+  },
+  "QUANT_TYPE": {
+   "disable": 0,
+   "u8": 1,
+   "i8": 2,
+   "i16": 3
+  },
+  "SLICE_LOCATION": {
+   "l1": 0,
+   "l2": 1
+  },
+  "STORE_FUNCTION": {
+   "sw": 0,
+   "sh": 1,
+   "sb": 2
+  }
+ },
+ "insts": {
+  "ACT0_COMPUTE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "act0_compute",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "channel",
+     "bits": 1,
+     "type": "ACT0_CHANNEL"
+    },
+    {
+     "kind": "enum",
+     "val": "target",
+     "bits": 2,
+     "type": "ACT0_OUTPUT_DEST"
+    },
+    {
+     "kind": "enum",
+     "val": "dest_datatype",
+     "bits": 2,
+     "type": "ACT_OUTPUT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "is_by_channel",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved1",
+     "bits": 6,
+     "type": "uint"
+    }
+   ]
+  },
+  "ACT0_SRC1_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "act0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "ACT0_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "channel",
+     "bits": 1,
+     "type": "ACT0_CHANNEL"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "rshift_bits",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 7,
+     "type": "uint"
+    }
+   ]
+  },
+  "ADD": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "ADDI": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm_imm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 3,
+     "type": "ARITHMETIC_IMM_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "imm",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "AI2D_COMPUTE": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "ai2d_compute",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 9,
+     "type": "uint"
+    }
+   ]
+  },
+  "AUIPC": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "auipc",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "imm",
+     "bits": 20,
+     "type": "uint"
+    }
+   ]
+  },
+  "BEQ": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "branch",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "BRANCH_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "BGE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "branch",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "BRANCH_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "BGEU": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "branch",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "BRANCH_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "BLT": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "branch",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "BRANCH_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "BLTU": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "branch",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "BRANCH_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "BNE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "branch",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "BRANCH_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "CCR_CLR": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "ccr_clr",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "ccr",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "CCR_DECL": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "ccr_decl",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rnum",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "CCR_SET": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "ccr_set",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "ccr",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "value",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "DIV": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "DIVU": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_CONF_BROADCAST": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_conf_broadcast",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "broadcast_if",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "broadcast_w",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "psum_cascade",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_LOAD_ACT0": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_load_act0",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rlen",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "dest_channel",
+     "bits": 1,
+     "type": "ACT0_CHANNEL"
+    },
+    {
+     "kind": "imm",
+     "val": "is_by_channel",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 7,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_LOAD_L1": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_load_l1",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rhtoc_window",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "l1_type",
+     "bits": 2,
+     "type": "L1_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_LOAD_L1_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "DM_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "enum",
+     "val": "l1_type",
+     "bits": 2,
+     "type": "L1_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 8,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_LOAD_W": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_load_w",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_bw",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "r_iochannels",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "dest_type",
+     "bits": 2,
+     "type": "DM_LOAD_W_DEST"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_LOAD_W_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "DM_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "kernel_h",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "kernel_w",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_oc",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    }
+   ]
+  },
+  "DM_LOAD_W_CONF2": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "DM_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rgroups",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rgoc",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_LOAD_W_CONF_DEQ": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "DM_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 13,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_STORE_OF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_store_of",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "src_channel",
+     "bits": 1,
+     "type": "ACT0_CHANNEL"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "DM_STORE_OF_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "dm_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "DM_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "END": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "end",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "EXTRAW": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "extraw",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "extrd",
+     "bits": 10,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "imm",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "EXTRW": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "extrw",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "extrd",
+     "bits": 10,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "imm",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "FENCE": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "fence",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 9,
+     "type": "uint"
+    }
+   ]
+  },
+  "FENCE_I": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "fence_i",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 9,
+     "type": "uint"
+    }
+   ]
+  },
+  "INTR": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "intr",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "JAL": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "jal",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 20,
+     "type": "uint"
+    }
+   ]
+  },
+  "JALR": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "jalr",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "L2_LOAD": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "l2_load",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "L2_LOAD_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "l2_load_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "l2_datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "enum",
+     "val": "ddr_datatype",
+     "bits": 3,
+     "type": "DDR_DATATYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 14,
+     "type": "uint"
+    }
+   ]
+  },
+  "L2_LOAD_W": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "l2_load_w",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rvalid_c_num",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "L2_LOAD_W_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "l2_load_w_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rlen_compressed",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rlen_decompressed",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "l2_datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "enum",
+     "val": "ddr_datatype",
+     "bits": 3,
+     "type": "DDR_DATATYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "enable_decompress",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 9,
+     "type": "uint"
+    }
+   ]
+  },
+  "L2_STORE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "l2_store",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "L2_STORE_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "l2_store_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "l2_datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "enum",
+     "val": "ddr_datatype",
+     "bits": 3,
+     "type": "DDR_DATATYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 14,
+     "type": "uint"
+    }
+   ]
+  },
+  "LB": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "load",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "LOAD_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "LBU": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "load",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "LOAD_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "LH": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "load",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "LOAD_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "LHU": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "load",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "LOAD_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "LUI": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "lui",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "imm",
+     "bits": 20,
+     "type": "uint"
+    }
+   ]
+  },
+  "LW": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "load",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "LOAD_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "LoadDDrAddr": {
+   "composite": true
+  },
+  "LoadImm": {
+   "composite": true
+  },
+  "MFU_ACT1_COMPUTE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_act1_compute",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "raddr_d1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "raddr_s1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "raddr_s2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_arg",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "MFU_ACT1_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "is_by_channel",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "is_16_segments",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 14,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF_DEQ": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rscale",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rbias",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "sid",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "rshift_bits",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF_DEST": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rlen",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF_QUANT": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "rshift_bits",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 13,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF_SRC1": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rslice",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rright_repeats",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rslice_repeats",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "sid",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "slice_loc",
+     "bits": 1,
+     "type": "SLICE_LOCATION"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF_SRC2": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rleft_repeats",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "sid",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "source_type",
+     "bits": 1,
+     "type": "ACT1_SOURCE_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_ACT1_CONF_STRIDE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rstride_s1",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rstride_s2",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rstride_d1",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 11,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_MEMCPY": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_memcpy",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 6,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_MEMSET": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_memset",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rv",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "l2_datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 7,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_PDP1_COMPUTE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_pdp1_compute",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved1",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_PDP1_CONF1": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "stride_w",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "stride_h",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct2",
+     "bits": 2,
+     "type": "PDP_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_PDP1_CONF2": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rcount_w",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rcount_h",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rpe_h",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rpe_last_h",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    }
+   ]
+  },
+  "MFU_PDP1_CONF3": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rpe_channels",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rpe_last_channels",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rpad_value",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "sspad",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_PDP1_CONF4": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rwindow_w",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rwindow_h",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rscale",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "enable_h2c",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "enable_bw",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_PDP1_CONF_DEQ": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rscale",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rbias",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "rshift_bits",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_PDP1_CONF_QUANT": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rscale",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rbias",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "rshift_bits",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_TRANSPOSE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_transpose",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "MFU_TRANSPOSE_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mfu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "MFU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "l2_datatype",
+     "bits": 2,
+     "type": "L2_DATATYPE"
+    },
+    {
+     "kind": "enum",
+     "val": "permute",
+     "bits": 5,
+     "type": "MFU_TRANS_PERMUTE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 7,
+     "type": "uint"
+    }
+   ]
+  },
+  "MMU_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mmu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rstart",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rdepth",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "mmu_id",
+     "bits": 4,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 11,
+     "type": "uint"
+    }
+   ]
+  },
+  "MMU_SETID": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "mmu_set_id",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "mmu_id",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "MUL": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_COMPUTE": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_compute",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "of_shift_mode",
+     "bits": 2,
+     "type": "PU_OF_SHIFT_MODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 4,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_COMPUTE_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "load_psum",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "clr_psum",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "dest_target",
+     "bits": 1,
+     "type": "PU_OUTPUT_DEST"
+    },
+    {
+     "kind": "imm",
+     "val": "release_if",
+     "bits": 1,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "mode",
+     "bits": 1,
+     "type": "PU_COMPUTE_MODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 10,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_FETCHIF_CONF1": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "stride_w",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "stride_h",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_s",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_FETCHIF_CONF2": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rgic",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rgic_last",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_FETCHIF_CONF3": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rgroups",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_FETCHIF_CONF4": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rpad_value",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "sspad",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved1",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_FETCHIF_CONF_DEQ": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "ric",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rbx",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 3,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_FORWARD_PSUM": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_forward_psum",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rlen",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 9,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_OF_CONF1": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rgoc",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rgoc_last",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_OF_CONF2": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_d",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved1",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_COMPUTE": {
+   "size": 2,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_compute",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "raddr_s",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 1,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_CONF_DEQ": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rbx",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "quant_type",
+     "bits": 2,
+     "type": "QUANT_TYPE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 8,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_FETCHIF_CONF1": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "stride_w",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "stride_h",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_FETCHIF_CONF2": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rgic",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rgic_last",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_FETCHIF_CONF3": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 10,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved1",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_FETCHIF_CONF4": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rpad_value",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "sspad",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 7,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_MODE_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "mode",
+     "bits": 3,
+     "type": "PU_PDP0_MODE"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_OF_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "enum",
+     "val": "rstride_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rshape_d",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 9,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_PDP0_W_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_pdp0_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_PDP0_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "kernel_h",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "kernel_w",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "PU_W_CONF": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "pu_conf",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "imm",
+     "val": "tcu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "pu_id",
+     "bits": 3,
+     "type": "uint"
+    },
+    {
+     "kind": "raw",
+     "val": "funct4",
+     "bits": 4,
+     "type": "PU_CONF_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "kernel_h",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "kernel_w",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "REM": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "REMU": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "SB": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "store",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "STORE_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "SH": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "store",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "STORE_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  },
+  "SS_PACK_SHAPE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "ss_pack_shape",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rn",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rc",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rh",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rw",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rss",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "SS_PACK_STRIDE": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "ss_pack_stride",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rn",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rc",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rh",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    },
+    {
+     "kind": "enum",
+     "val": "rss",
+     "bits": 3,
+     "type": "SHAPE_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved1",
+     "bits": 2,
+     "type": "uint"
+    }
+   ]
+  },
+  "SUB": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "arithm",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "rs1",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct5",
+     "bits": 5,
+     "type": "ARITHMETIC_FUNCTION"
+    },
+    {
+     "kind": "raw",
+     "val": "rs2",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "imm",
+     "val": "reserved0",
+     "bits": 5,
+     "type": "uint"
+    }
+   ]
+  },
+  "SW": {
+   "size": 4,
+   "fields": [
+    {
+     "kind": "opcode",
+     "val": "store",
+     "bits": 7,
+     "type": "OPCODE"
+    },
+    {
+     "kind": "enum",
+     "val": "rd",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "enum",
+     "val": "rs",
+     "bits": 5,
+     "type": "GP_REGISTER"
+    },
+    {
+     "kind": "raw",
+     "val": "funct3",
+     "bits": 3,
+     "type": "STORE_FUNCTION"
+    },
+    {
+     "kind": "imm",
+     "val": "offset",
+     "bits": 12,
+     "type": "uint"
+    }
+   ]
+  }
+ }
+}
