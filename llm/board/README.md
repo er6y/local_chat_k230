@@ -13,7 +13,7 @@ qwen25 kv6_stacked 线的板端权威工具全在 **`static/`**（详见其 READ
 
 | 文件 | 作用 | 状态 |
 |---|---|---|
-| `chatd.cpp` / `kpud.cpp` | 语音助手守护进程源码（chatd 总管 + kpud KPU 池） | **生产栈 2026-09-18 停用**（用户裁定"等隔壁把 llm 弄好再说"），恢复 = `chmod +x /etc/init.d/S99chat` |
+| `chatd.cpp` / `kpud.cpp` | 语音助手守护进程源码（chatd 总管 + kpud KPU 池） | **生产栈 2026-09-18 停用，现在不管**；定位=将来接新 kmodel 与 TTS 调度的生产壳，接入时恢复 = `chmod +x /etc/init.d/S99chat` |
 | `safe_run.sh` | WDT 喂狗包裹器，一切长任务必须经它跑 | ✅ 现役纪律 |
 | `selftest_bn2.sh` | KPU 数值自检（判据 cos>0.98） | ✅ 现役 |
 | `rootfs-overlay/S52wifi` + `usr-local-bin/wifi_keepalive.sh` | WiFi 自愈链（装 /etc/init.d 与 /usr/local/bin） | ✅ 现役（8189fs 5.11.6 配套） |
