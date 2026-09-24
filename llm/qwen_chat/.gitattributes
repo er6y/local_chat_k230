@@ -1,0 +1,4 @@
+3rd_party/**/*.a filter=lfs diff=lfs merge=lfs -text
+3rd_party/**/*.so filter=lfs diff=lfs merge=lfs -text
+3rd_party/**/*.so.* filter=lfs diff=lfs merge=lfs -text
+3rd_party/nncase/x86_64/bin/* filter=lfs diff=lfs merge=lfs -text

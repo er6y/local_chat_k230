@@ -1,1 +1,5 @@
 build*/
+3rd_party/nncase/riscv64/bin/
+!3rd_party/**/*.a
+!3rd_party/**/*.so
+!3rd_party/**/*.so.*
