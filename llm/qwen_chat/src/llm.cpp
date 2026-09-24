@@ -265,8 +265,7 @@ std::string Llm::generate(const std::vector<int>& input_ids, std::ostream* os, c
         et = std::chrono::system_clock::now();
         decode_us_ += std::chrono::duration_cast<std::chrono::microseconds>(et - st).count();
 #ifdef STEP_TIMING
-        fprintf(stderr, "[step] n=%d H=%d %.1fms
-", gen_seq_len_, all_seq_len_,
+        fprintf(stderr, "[step] n=%d H=%d %.1fms\n", gen_seq_len_, all_seq_len_,
                 std::chrono::duration<double, std::milli>(et - st).count());
 #endif
         if (is_stop(token)) {
