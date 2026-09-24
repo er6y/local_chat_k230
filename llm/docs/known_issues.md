@@ -23,7 +23,7 @@
 
 | # | 症状 | 根因 | 修复位置 |
 |---|---|---|---|
-| E1 | ERNIE 跑分词 273GB bad_alloc（假案"运行时元数据之谜"） | tokenizer.cpp decode 无越界检查 + replace(pos,3) 笔误 | cxx/qwen_chat_overlay/tokenizer.cpp.patch |
+| E1 | ERNIE 跑分词 273GB bad_alloc（假案"运行时元数据之谜"） | tokenizer.cpp decode 无越界检查 + replace(pos,3) 笔误 | qwen_chat/src/tokenizer.cpp（diff 存 qwen_chat/patches/） |
 | E2 | 剪枝模型 terminate | 重复惩罚 scores[旧id] 越界写堆 | qwen_chat_remap（板上，.oobfix 版） |
 | E3 | qwen_chat "config null" type_error 306 | config.json 传成目录 | 用法：传文件路径 |
 | E4 | chatd 开机全家死绝（子进程 exec 永久阻塞） | FIFO O_WRONLY\|NONBLOCK 无读者 ENXIO | chat_service S99chat/chatd（O_RDWR 自持读者） |

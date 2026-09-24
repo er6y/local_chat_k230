@@ -31,7 +31,7 @@ llama.cpp 路线已退役删除。
 | `board/` | 生产基础设施（chatd/kpud） | 板 |
 | `board/static/` | 静态 kmodel 板上计时/剖析/取证脚本 + NOC poke | 板 |
 | `tools/` | GNNE ISA 逆向（spec/编码器/解码器）、kmodel 格式解析 | 通用 |
-| `cxx/` | C++ 计时器 bench_kv6 + qwen_chat 补丁 overlay | 本机 WSL 交叉编译 |
+| `qwen_chat/` | **官方 runner 补丁版**（vendored，含我们的 3 补丁 + bench_kv6 计时器；patches/=对照上游的 diff） | 本机 WSL 交叉编译 |
 | `docs/` | 对齐规格书、优化空间分析、已知问题清单 | — |
 
 ## 快速上手（编译一版全模型）
@@ -56,5 +56,5 @@ python3 board/static/bd_kv6q2cpu.py /mnt/data/static/llm_kv6_stacked.kmodel 20
 |---|---|---|
 | 编译器 pass/发射/量化规则 | `../nncase/` submodule（github.com/er6y/nncase 分支 k230，基线 v2.8.3，模块提交 bfdfd9a8） | ✅ 已推远端，构建+哨兵验证过（docs/nncase-fork.md） |
 | 模型图结构（改 ONNX 本体） | `onnx/`（export+手术；部分将来可编译器化） | ✅ |
-| 宿主 C++（demo/计时器） | `cxx/`（自留，后续生成备用模型直接用） | ✅ |
+| 宿主 C++（runner/计时器） | `qwen_chat/`（上游无公开 git，vendored 自留，后续生成备用模型直接用） | ✅ |
 | 板上测量/取证 | `board/static/` + `tools/` | ✅ |
