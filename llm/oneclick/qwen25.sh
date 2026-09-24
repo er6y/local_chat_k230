@@ -95,6 +95,9 @@ do_bench() {
   [ -n "$up" ] || die "板子 4 分钟没起来"
   # golden window：开机满 230s 再动 CMA（过早 ~1GB 窗口装载会 segfault，见板端规程）
   sleep 105
+  # 板端资产自举（幂等）：noc_poke.sh 曾缺失导致 bench 必死，推板脚本自带
+  scp -q -o BatchMode=yes "$L/board/static/noc_poke.sh" $BOARD:/mnt/data/static/ || die "推 noc_poke.sh 失败"
+  scp -q -o BatchMode=yes "$L/board/static/bd_kv6q2cpu.py" $BOARD:/mnt/data/static/ || die "推 bd_kv6q2cpu.py 失败"
   ssh -o BatchMode=yes $BOARD "sync; echo 3 > /proc/sys/vm/drop_caches; ln -sf /dev/k230-gnne /dev/gnne_device" || die "板端准备失败"
   ssh -o BatchMode=yes $BOARD "sh /mnt/data/static/noc_poke.sh" || die "noc_poke 失败"
   CMA=$(ssh -o BatchMode=yes $BOARD "grep CmaFree /proc/meminfo" | awk '{print \$2}')
