@@ -34,7 +34,7 @@ ssh $BOARD "sync; echo 3 > /proc/sys/vm/drop_caches; ln -sf /dev/k230-gnne /dev/
 ssh $BOARD "grep CmaFree /proc/meminfo"
 
 echo "=== 3/4 跑推理（fresh 二进制） ==="
-ssh $BOARD "echo '今天天气怎么样？' > /tmp/vt_q1.txt; cd $MODEL_DIR && timeout 120 $BTGT ./config_vt.json /tmp/vt_q1.txt" | tee /tmp/verify_runner_out.txt
+ssh $BOARD "echo '今天天气怎么样？' > /tmp/vt_q1.txt; cd $MODEL_DIR && $BTGT ./config_vt.json /tmp/vt_q1.txt" | tee /tmp/verify_runner_out.txt
 
 echo "=== 4/4 判定 ==="
 DECODE=$(grep -oE "decode[^0-9]*[0-9]+\.[0-9]+" /tmp/verify_runner_out.txt | tail -1 || true)

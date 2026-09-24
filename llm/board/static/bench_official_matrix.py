@@ -3,7 +3,8 @@
 # （带 poke），qwen_chat 自报 335ms。本脚本扫 H（KV 深度）× 序列长，定位差距来源。
 # 前置：golden window（reboot→230s）+ drop_caches + noc_poke 已由调用方完成。
 # 用法：python3 bench_official_matrix.py [H列表逗号分隔，默认 29,63,127,255]
-# 注意：换 H=换输入形状（bucket 重选），每个 H 独立 load_model，规避 bucket 缓存坑。
+# 注意：一个进程只装一次模型（CMA 协议：装载之间必须 reboot），所以每次调用只吃一个 H。
+# 用法：python3 bench_official_matrix.py <H>   （调用方负责 reboot+golden+poke 循环）
 import sys, time
 import numpy as np
 import nncaseruntime as nn
@@ -44,16 +45,4 @@ for H in HS:
     except Exception as e:
         print('%4d            | FAIL %s' % (H, repr(e)[:60]), flush=True)
 
-# prefill 对照（seq=8, H=255）
-try:
-    itp = nn.Interpreter()
-    itp.load_model(open(KM, 'rb').read())
-    ts_feed = feed(255, seq=8)
-    for i, t in enumerate(ts_feed):
-        itp.set_input_tensor(i, nn.RuntimeTensor.from_numpy(np.ascontiguousarray(t)))
-    itp.run()
-    t0 = time.time(); itp.run()
-    print('prefill seq=8 H=255: %.1f ms (%.1f tok/s)' % ((time.time() - t0) * 1000, 8000.0 / (time.time() - t0)), flush=True)
-except Exception as e:
-    print('prefill FAIL', repr(e)[:60], flush=True)
 print('OFFMAT_DONE', flush=True)
