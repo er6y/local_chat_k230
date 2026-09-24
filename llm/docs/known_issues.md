@@ -4,7 +4,7 @@
 
 | # | 问题 | 状态 | 缓解/修复 |
 |---|---|---|---|
-| A1 | **w32 滑窗质量未验收**：窗口只看最近 32 token，长依赖问答会错 | **未验收，上产前必测** | eval 集（10 长依赖题 + 20 常规题）跑 kv6_stacked vs 官方全历史对照；不行就 w64（编译参数 W 改） |
+| A1 | **w32 滑窗质量未验收**：窗口只看最近 32 token，长依赖问答会错 | **未验收，上产前必测** | eval 集（10 长依赖题 + 20 常规题）跑 kv6_stacked vs 官方全历史对照；不行就 w64（编译参数 W 改）。**harness 方案**：chat_static.py（两模型交互驱动）改造成 kv6 五输入版，贪心生成 dump 文本离线评分——这是 A1 的第一块砖 |
 | A2 | T2 peephole 数值不过：mini 逐位过，全模型 sim cos=0.9396 | 已禁用（compiler/ActionToInstruct.cs 两行注释） | 疑区边界配对变换值域假设；修复+全模型 oracle 过了再开 |
 | A3 | QuantToCpu 量化噪声：q2cpu 链路输出 diff mean=0.0013（u8 单 LSB 量级） | ✅ 可接受 | 持续监控 argmax 指纹（bd_kv6q2cpu.py 应=13） |
 | A4 | 单样本校准的历史遗留：早期模型复读/乱码 | ✅ 已被多样本校准+range128 根治 | 保持 calib 多样本配方 |
@@ -33,6 +33,6 @@
 
 ## 四、待观察
 
-- 官方 202ms 标尺的复现条件（见 docs/optimization_space.md 第 1 条）
+- 官方 202ms 标尺的复现条件：扫查脚本已预置 `board/static/bench_official_matrix.py`（H×seq 矩阵，golden window 下跑）
 - GNNE 大解码板上会 OOM 爆网（tools/README 有警告）；k230 模拟器路径已迁服务器
 - 512 主机 WSL 已判死（lxcore.sys），机器重启被禁——512 只作只读档案
