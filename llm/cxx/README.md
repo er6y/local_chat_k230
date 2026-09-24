@@ -1,5 +1,13 @@
 # cxx/ — C++ 运行器与官方 demo 补丁
 
+> **定位（这是什么）**：nncase = **编译器**（onnx→kmodel，源码在 `../nncase` submodule）
+> **+ 运行时**（板上加载 kmodel 执行）。运行时在板上有两种形态：python 包
+> （nncaseruntime）和 C++ 预编译库（闭源 .a）。**本目录不是 nncase 本体**，是"运行器的
+> 运行器"——踩在运行时库上面的宿主 C++ 程序：① bench_kv6.cc 我们自写的最小计时器；
+> ② qwen_chat = 官方开源 demo（github k230_ai_assistant，参考性质）的**补丁 overlay**，
+> 修了它的分词器越界 bug。将来生成备用的模型直接用这里的 C++ 路径消费。
+> 推理器本体（.a）闭源，我们不补丁它——补丁都在它上面的 demo/runner 层。
+
 ## bench_kv6.cc — 最小计时运行器（已验证：C++ 278ms ≈ python 268ms，宿主语言无税）
 
 用法：`./bench_kv6 <kmodel> [reps] [H]`（llm.kmodel 文件名自动切官方 4 输入模式，H=历史深度）

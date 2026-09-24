@@ -25,16 +25,16 @@ scp -r local_chat_k230/llm yilei.wang@172.16.160.138:/ux/work/yilei.wang/k230/
 
 | # | 步骤 | 在哪跑 | 自动化 |
 |---|---|---|---|
-| 1 | HF 权重导出（llm-export-old） | 本地 WSL `~/llm-export-old` | 手动（命令见 `../surgery/README.md` 锁版说明） |
-| 2 | lm_head 切块（`split_lmhead_24.py`） | 本地 WSL | 手动，脚本已收 `../surgery/` |
-| 3 | s1h256 静态化 + GQA 折叠（`gqa_fold_tool.py` → gqaS3） | 本地 WSL | 手动，脚本已收 |
-| 4 | kv6 窗口图手术（kvwin_surgery v5→v6 进化版） | 本地 WSL | **脚本待回收集**（tmp/kvwin_surgery.py 是 v5，v6 当时就地改的） |
-| 5 | 输出堆叠（`../compile/stack_outputs.py`）+ 校准集 calib48_diverse.npz | 服务器 | 堆叠已收；**校准生成脚本待回收集**（当时 heredoc 一次性） |
+| 1 | HF 权重导出（llm-export-old） | 本地 WSL `~/llm-export-old` | 手动（`../onnx/export.sh`） |
+| 2 | lm_head 切块（`split_lmhead_24.py`） | 本地 WSL | ✅ `../onnx/` 脚本化 |
+| 3 | s1h256 静态化（**脚本待考古**）+ GQA 折叠（`gqa_fold_tool.py`） | 本地 WSL | ⚠️ 半缺口 |
+| 4 | kv6 窗口图手术 | 本地 WSL | ⚠️ `../onnx/kvwin_surgery.py` 是 v5，v6 待反推 |
+| 5 | 输出堆叠（`../onnx/stack_outputs.py`）+ 校准集 calib48_diverse.npz | 服务器 | ✅ 堆叠；❌ 校准生成脚本缺口 |
 | 6 | 编译→推板→打分（本目录 `qwen25.sh`） | 服务器 | ✅ **一键** |
 | 7 | 换模型复制（ernie / qwen3-0.6 同模板） | — | 排队：qwen25 跑稳后套模板 |
 
-> 4/5 的"待回收集"= 从历史一次性脚本（k230_prj/tmp/、WSL /root）整理成带参数的
-> 正式脚本并 ORT 对拍。做 ernie/qwen3 一键之前必须补上，否则换模型要重新考古。
+> 缺口明细与 TODO 见 `../onnx/README.md` 链条表。做 ernie/qwen3 一键之前必须补上，
+> 否则换模型要重新考古。
 
 ## 产物与资产位
 

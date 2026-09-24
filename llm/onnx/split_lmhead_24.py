@@ -1,6 +1,9 @@
+import sys
 import onnx, numpy as np
 from onnx import numpy_helper
-m = onnx.load('/root/qwen25_pipe/onnx/llm.onnx', load_external_data=True)
+SRC = sys.argv[1] if len(sys.argv) > 1 else '/root/qwen25_pipe/onnx/llm.onnx'
+DST = sys.argv[2] if len(sys.argv) > 2 else '/root/qwen25_24l_split.onnx'
+m = onnx.load(SRC, load_external_data=True)
 g = m.graph
 inits = {i.name: i for i in g.initializer}
 
@@ -41,5 +44,5 @@ for j, nn in enumerate(new_nodes):
 g.initializer.remove(inits['/lm/lm_head/Linear_weight'])
 
 m2 = m
-onnx.save_model(m2, '/root/qwen25_24l_split.onnx', save_as_external_data=False)
+onnx.save_model(m2, DST, save_as_external_data=False)
 print('saved split-lmhead onnx')

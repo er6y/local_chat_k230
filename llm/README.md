@@ -25,8 +25,9 @@ llama.cpp 路线已退役删除。
 
 | 目录 | 内容 | 运行地 |
 |---|---|---|
-| `surgery/` | ONNX 图手术：lm_head 切块、GQA fold、输出堆叠（编译器搞不定的结构改动） | 本机/服务器 |
-| `compile/` | 全模型编译脚本 + 服务器环境配方 + 分块推板 | 128 服务器 |
+| `onnx/` | **onnx 从哪来**：export.sh 导出（HF 权重→llm-export）+ 全部图手术脚本 + 复现等级表 | 本机 WSL |
+| `compile/` | 现役编译+推板脚本（实验归档在 `compile/lab/`） | 128 服务器 |
+| `oneclick/` | **一键流水线**：qwen25.sh 编译→推板→打分→PASS/FAIL | 128 服务器 |
 | `board/` | 生产基础设施（chatd/kpud） | 板 |
 | `board/static/` | 静态 kmodel 板上计时/剖析/取证脚本 + NOC poke | 板 |
 | `tools/` | GNNE ISA 逆向（spec/编码器/解码器）、kmodel 格式解析 | 通用 |
@@ -54,6 +55,6 @@ python3 board/static/bd_kv6q2cpu.py /mnt/data/static/llm_kv6_stacked.kmodel 20
 | 改动类型 | 归属 | 现状 |
 |---|---|---|
 | 编译器 pass/发射/量化规则 | `../nncase/` submodule（github.com/er6y/nncase 分支 k230，基线 v2.8.3，模块提交 bfdfd9a8） | ✅ 已推远端，构建+哨兵验证过（docs/nncase-fork.md） |
-| 模型图结构（改 ONNX 本体） | `surgery/`（部分将来可编译器化，见其 README） | ✅ |
+| 模型图结构（改 ONNX 本体） | `onnx/`（export+手术；部分将来可编译器化） | ✅ |
 | 宿主 C++（demo/计时器） | `cxx/`（自留，后续生成备用模型直接用） | ✅ |
 | 板上测量/取证 | `board/static/` + `tools/` | ✅ |

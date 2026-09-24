@@ -1,7 +1,10 @@
+import sys
 import onnx
 from onnx import helper, TensorProto
 
-m = onnx.load('qwen25_24l_s1h256_kv6.onnx')
+SRC = sys.argv[1] if len(sys.argv) > 1 else 'qwen25_24l_s1h256_kv6.onnx'
+DST = sys.argv[2] if len(sys.argv) > 2 else 'qwen25_24l_s1h256_kv6_stacked.onnx'
+m = onnx.load(SRC)
 g = m.graph
 names = [o.name for o in g.output]
 kt = [n for n in names if n.startswith('ktnew')]
@@ -20,5 +23,5 @@ stack(kt, 'ktnew_all')
 stack(vt, 'vtnew_all')
 del g.output[:]
 g.output.extend(new_outputs)
-onnx.save(m, 'qwen25_24l_s1h256_kv6_stacked.onnx')
+onnx.save(m, DST)
 print('saved, outputs:', [o.name for o in g.output])
